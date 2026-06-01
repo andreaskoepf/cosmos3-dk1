@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: OpenMDW-1.1
+#
+# dk1_action_sft_nano — LoRA world+action SFT of Cosmos3-Nano on the DK-1 datamix.
+# Consumed by cosmos_framework.configs.toml_config.sft_config.load_experiment_from_toml,
+# layered on top of the registered `dk1_action_sft_nano` experiment (configs/dk1_action_sft_nano.py).
+#
+# This is sized as a 2-GPU DRY RUN (max_iter=10). Scale max_iter/lr/datamix up after it's green.
+# Env vars expected (set by scripts/launch_dk1_sft.sh):
+#   BASE_CHECKPOINT_PATH  → cosmos-dk1/checkpoints/Cosmos3-Nano-dcp
+#   DK1_DATA_ROOT         → a dk1 LeRobot dataset root (single root for the dry run)
+#   DK1_ACTION_STATS      → cosmos-dk1/data/dk1_action_normalization.json
+
+[job]
+task         = "vfm"
+experiment   = "dk1_action_sft_nano"
+project      = "dk1-cosmos-sft"
+group        = "sft"
+name         = "dk1_action_sft_nano"
+# online by default now (auth via ~/.netrc). The launcher passes
+# job.wandb_mode=$WANDB_MODE, so flip back with: WANDB_MODE=offline bash scripts/launch_dk1_sft.sh
+wandb_mode   = "online"
+
+[model]
+max_num_tokens_after_packing = 45056
+joint_attn_implementation    = "two_way"
+precision                    = "bfloat16"
+# LoRA-only (base weights frozen) — fits 2x H100. Targets the generator MoE attention.
+lora_enabled                 = true
+lora_rank                    = 16
+lora_alpha                   = 32
+lora_target_modules          = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen"
+
+[model.ema]
+enabled         = false                  # LoRA → no EMA
+
+[model.parallelism]
+data_parallel_shard_degree      = -1     # auto from WORLD_SIZE (=2) → FSDP shard across both GPUs
+data_parallel_replicate_degree  = 1
+
+[model.compile]
+enabled                         = false  # off for the dry run (faster startup, fewer unknowns)
+compile_dynamic                 = true
+
+[model.activation_checkpointing]
+mode                = "full"
+save_ops_regex      = ["fmha"]
+preserve_rng_state  = true
+determinism_check   = "default"
+
+[model.tokenizer]
+# Wan2.2 VAE for video tokenization. Points at the local copy (same official
+# Wan2.2_VAE.pth FastWAM uses) via $WAN_VAE_PATH set by the launcher.
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+betas          = [0.9, 0.95]
+eps            = 1.0e-6
+fused          = true
+# Hybrid: LoRA adapters on the generator attention (world/visual prior) PLUS
+# FULL training of the action-specific modules — dk1 is a brand-new embodiment
+# (domain 25), so its action2llm/llm2action DomainAwareLinear rows are untrained
+# and must be learned, not LoRA-adapted. (Mirrors how full vision SFT trains
+# vae2llm/llm2vae.) Verify at dry-run that these get requires_grad=True under LoRA.
+keys_to_select = ["lora_", "action2llm", "llm2action", "action_modality_embed"]
+lr             = 5.0e-4
+weight_decay   = 0
+
+[scheduler]
+cycle_lengths      = [1000]
+f_max              = [1.0]
+f_min              = [0.0]
+f_start            = [0.0]
+verbosity_interval = 0
+warm_up_steps      = [5]
+
+[trainer]
+distributed_parallelism = "fsdp"
+grad_accum_iter         = 2
+logging_iter            = 1
+max_iter                = 20             # DRY RUN — bump to real budget once green
+
+[trainer.callbacks.grad_clip]
+# 1.0 (not the vision-SFT recipe's 0.1): our action2llm/llm2action are trained
+# from scratch for a new embodiment, so 0.1 would over-throttle early learning.
+# Matches the videophy2 / llava Cosmos recipes. Watch norm_monitor grad norms.
+clip_norm    = 1.0
+force_finite = true
+
+[checkpoint]
+keys_to_skip_loading = ["net_ema.", "lora_"]   # LoRA tensors fresh-init
+load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter            = 10
+# load_training_state=false / strict_resume=false are set in the experiment config
+# (not TOML-schema keys).
+
+[dataloader_train]
+max_sequence_length = 45056

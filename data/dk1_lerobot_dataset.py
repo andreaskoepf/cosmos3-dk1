@@ -1,0 +1,374 @@
+# SPDX-License-Identifier: OpenMDW-1.1
+"""DK-1 bimanual LeRobot dataset for Cosmos 3 action SFT.
+
+Adapted from cosmos_framework's DROIDLeRobotDataset. Differences:
+  - 3 dk1 cameras: head (exterior, top) + left_wrist/right_wrist (bottom row).
+  - 14D **joint-space** action read directly from the `action` column
+    (vs DROID's 10D cartesian pose deltas) — no FK/pose math.
+  - dk1 embodiment / domain id (registered in domain_utils as "dk1" = 25).
+  - per-episode videos + from/to timestamps (already supported by the Cosmos
+    decode path — see cosmos-dk1/docs/lerobot_compat.md).
+
+Action layout (matches FastWAM dk1): [left_arm(6), left_gripper(1),
+right_arm(6), right_gripper(1)] = 14D, indices 0..13.
+
+⚠ First-pass / TODO (validate at dry-run):
+  - `initial_pose` is omitted (joint-space has no single EE pose). Confirm the
+    action training_step doesn't require it for forward/inverse/policy modes;
+    if it does, supply an FK-derived pose or identity.
+  - Gripper kept raw (DROID inverts via 1-g); quantile-norm handles range.
+  - Action is **absolute** normalized joint setpoints. If the recipe expects
+    relative/delta joint targets, switch to per-step deltas + recompute stats.
+"""
+from __future__ import annotations
+
+import json
+import random
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pyarrow.parquet as pq
+import torch
+import torch.nn.functional as F
+from lerobot.datasets.video_utils import decode_video_frames
+from torch.utils.data import Dataset
+
+from cosmos_framework.data.vfm.action.action_normalization import load_action_stats, normalize_action
+from cosmos_framework.data.vfm.action.action_spec import Gripper, Joint, build_action_spec
+from cosmos_framework.data.vfm.action.domain_utils import get_domain_id
+from cosmos_framework.data.vfm.action.pose_utils import compute_idle_frames
+from cosmos_framework.data.vfm.sequence_packing import SequencePlan, add_special_tokens
+from cosmos_framework.model.vfm.vlm.qwen3_vl.utils import tokenize_caption
+from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
+
+_MAX_TEXT_TOKENS = 1024
+
+# Physical dk1 cameras → view slots. head is the third-person/exterior view.
+_TOP_VIEW = "observation.images.head"
+_BOTTOM_LEFT = "observation.images.left_wrist"
+_BOTTOM_RIGHT = "observation.images.right_wrist"
+_ACTION_FEATURE = "action"            # 14D joint+gripper setpoints
+_STATE_FEATURE = "observation.state"  # 40D: pos[:14] = joint+gripper, then vel[12], torque[14]
+
+# 14D action layout: [left_arm(0-5), left_gripper(6), right_arm(7-12), right_gripper(13)].
+_JOINT_DIMS = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
+_GRIPPER_DIMS = [6, 13]
+
+_MODE_CHOICES = ("forward_dynamics", "inverse_dynamics", "policy")
+
+
+def dk1_action_spec():
+    """14D bimanual joint-space ActionSpec."""
+    return build_action_spec(
+        Joint(n=6, label="left_arm"), Gripper(prefix="left"),
+        Joint(n=6, label="right_arm"), Gripper(prefix="right"),
+    )
+
+
+class DK1LeRobotDataset(Dataset):
+    """DK-1 bimanual joint-space action dataset (single LeRobot root).
+
+    Blend across the 21-source dk1 datamix is handled at the config level
+    (one instance per root + ConcatDataset / weighted sampler), mirroring how
+    FastWAM weighted its blend.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        normalization_path: str,
+        fps: float = 30.0,
+        chunk_length: int = 16,
+        mode: str = "joint",
+        tolerance_s: float = 1e-2,  # looser than DROID's 2e-4; dk1 ts precision
+        # Observation conditioning: number of CLEAN latent vision frames at the
+        # clip start. At 4x temporal compression, 2 latents ≈ 5 obs pixel frames
+        # (matches FastWAM's 5-obs window: 1 + (5-1)//4 = 2). 0 → pure generation.
+        num_clean_latent_frames: int = 2,
+        temporal_compression_factor: int = 4,
+        # RTC action prefix: max number of clean/conditioning action steps. When
+        # > 0, K is sampled uniformly in [0, rtc_action_prefix] per sample (random
+        # prefix, RTC-style) — the first K action steps are given clean and the
+        # rest predicted. 0 → predict the whole chunk (no action conditioning).
+        rtc_action_prefix: int = 0,
+        # Action target representation:
+        #   True  → joint dims RELATIVE to the chunk-start obs state
+        #           (observation.state[:14]); grippers absolute. Stats must be
+        #           computed on the same relative deltas (compute_dk1_action_stats
+        #           --relative, with gripper q01=0/q99=1 → linear (0,1)→(-1,1)).
+        #   False → absolute joint setpoints.
+        relative_actions: bool = True,
+        # Qwen VLM tokenizer config (Hydra ref to model.config.vlm_config.tokenizer).
+        # Required for real training — the joint dataloader needs text_token_ids.
+        tokenizer_config: Any = None,
+        # Output video size (H, W). Must be a valid Cosmos resolution bucket
+        # (divisible by 32). Default = the 256p 4:3 bucket (W=320, H=256). The
+        # tiled 3-cam frame is resized to this; keep the model's resolution config
+        # consistent (e.g. "256").
+        video_hw: tuple = (256, 320),
+        # Pad the 14-D dk1 action up to the model's action width (max_action_dim).
+        # raw_action_dim=14 is emitted so the loss masks the padded dims.
+        max_action_dim: int = 64,
+        # Video decode backend: "video_reader_rs" (fast Rust, frame-index, AV1;
+        # needs video_reader_rs.libs on LD_LIBRARY_PATH) or "lerobot" (torchcodec
+        # CPU, by timestamp). video_reader_rs hides the GPU-starving CPU decode.
+        video_backend: str = "video_reader_rs",
+    ) -> None:
+        super().__init__()
+        self._video_hw = (int(video_hw[0]), int(video_hw[1]))
+        self._max_action_dim = int(max_action_dim)
+        self._video_backend = str(video_backend)
+        self._root = Path(root)
+        self._fps = float(fps)
+        self._chunk_length = int(chunk_length)
+        self._mode = mode
+        self._relative_actions = bool(relative_actions)
+        self._vlm_tokenizer = None
+        if tokenizer_config is not None:
+            self._vlm_tokenizer = lazy_instantiate(tokenizer_config).tokenizer
+            self._vlm_tokenizer, _ = add_special_tokens(self._vlm_tokenizer)
+        self._tolerance_s = float(tolerance_s)
+        self._num_clean_latent_frames = int(num_clean_latent_frames)
+        self._temporal_compression_factor = int(temporal_compression_factor)
+        self._rtc_action_prefix = int(rtc_action_prefix)
+        self._normalization_path = str(normalization_path)
+        self._domain_id = get_domain_id("dk1")
+        self._norm_stats: dict[str, torch.Tensor] | None = None
+
+        self._info = json.loads((self._root / "meta" / "info.json").read_text())
+        self._episodes = {
+            int(row["episode_index"]): row
+            for path in sorted((self._root / "meta" / "episodes").glob("chunk-*/file-*.parquet"))
+            for row in pq.read_table(path).to_pylist()
+        }
+        tasks_path = self._root / "meta" / "tasks.parquet"
+        self._tasks = (
+            {int(r["task_index"]): str(r["task"]) for r in pq.read_table(tasks_path).to_pylist()}
+            if tasks_path.exists() else {}
+        )
+        self._rows = sorted(
+            (
+                row
+                for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet"))
+                for row in pq.read_table(path).to_pylist()
+            ),
+            key=lambda row: int(row["index"]),
+        )
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
+    def chunk_length(self) -> int:
+        return self._chunk_length
+
+    @property
+    def domain_id(self) -> int:
+        return self._domain_id
+
+    @property
+    def action_dim(self) -> int:
+        return 14
+
+    @property
+    def action_names(self) -> list[str]:
+        return dk1_action_spec().names
+
+    def _choose_mode(self) -> str:
+        return random.choice(_MODE_CHOICES) if self._mode == "joint" else self._mode
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        mode = self._choose_mode()
+        idx = int(idx)
+        first_row = self._rows[idx]
+        episode = self._episodes[int(first_row["episode_index"])]
+
+        observation_rows = self._rows[idx : idx + self._chunk_length + 1]
+        action_rows = observation_rows[: self._chunk_length]
+
+        video = self._load_concat_video(episode, observation_rows)
+        raw_action = self._build_raw_action(observation_rows, action_rows)
+        task = self._tasks.get(int(observation_rows[0].get("task_index", 0)), "")
+        ai_caption = random.choice(task.split(" | ")) if task else ""
+
+        return self._build_result(mode=mode, video=video, action=raw_action, ai_caption=ai_caption)
+
+    def _load_concat_video(self, episode: dict[str, Any], observation_rows: list[dict[str, Any]]) -> torch.Tensor:
+        timestamps = [float(row["timestamp"]) for row in observation_rows]
+
+        def decode(video_key: str) -> torch.Tensor:
+            path = self._video_path(episode, video_key)
+            from_ts = float(episode.get(f"videos/{video_key}/from_timestamp", 0.0))
+            abs_ts = [from_ts + ts for ts in timestamps]
+            if self._video_backend == "video_reader_rs":
+                return self._decode_vrs(path, abs_ts)
+            return decode_video_frames(path, abs_ts, self._tolerance_s)
+
+        top = decode(_TOP_VIEW)
+        left = decode(_BOTTOM_LEFT)
+        right = decode(_BOTTOM_RIGHT)
+        # Layout: head full-width on top; left|right wrist concatenated on bottom,
+        # each resized to half-height/half-width so the bottom row matches top width.
+        _, _, h, w = top.shape
+        half_h, half_w = h // 2, w // 2
+        left = F.interpolate(left, size=(half_h, half_w), mode="bilinear", align_corners=False)
+        right = F.interpolate(right, size=(half_h, half_w), mode="bilinear", align_corners=False)
+        bottom = torch.cat([left, right], dim=-1)
+        tiled = torch.cat([top, bottom], dim=-2)  # [T,3,H+H/2,W]
+        return self._fit_to_bucket(tiled)
+
+    def _decode_vrs(self, path: str, abs_ts: list[float]) -> torch.Tensor:
+        """Decode frames by index via video_reader-rs (fast Rust decoder).
+        Maps absolute timestamps → native video frame indices using the file fps."""
+        from video_reader import PyVideoReader
+        r = PyVideoReader(path)
+        fps = float(r.get_fps())
+        n = int(r.get_info().get("frame_count", 0)) or 10 ** 9
+        idx = [min(max(int(round(t * fps)), 0), n - 1) for t in abs_ts]
+        frames = np.asarray(r.get_batch(idx))  # [T, H, W, 3] uint8
+        return torch.from_numpy(frames).permute(0, 3, 1, 2).float() / 255.0  # [T,3,H,W] in [0,1]
+
+    def _fit_to_bucket(self, video: torch.Tensor) -> torch.Tensor:
+        """Snap a [T,3,H,W] clip to the target bucket WITHOUT distorting aspect:
+        downscale (preserving aspect) only if it exceeds the bucket, then center
+        reflection-pad to the exact bucket size (matches Cosmos's action pipeline)."""
+        ht, wt = self._video_hw
+        _, _, h, w = video.shape
+        scale = min(ht / h, wt / w)
+        if scale < 1.0:  # composite larger than bucket → fit inside, keep aspect
+            nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
+            video = F.interpolate(video, size=(nh, nw), mode="bilinear", align_corners=False)
+            _, _, h, w = video.shape
+        pad_h, pad_w = ht - h, wt - w
+        if pad_h or pad_w:
+            pt, pl = pad_h // 2, pad_w // 2
+            # reflect needs pad < dim; fall back to replicate otherwise.
+            mode = "reflect" if (pt < h and (pad_h - pt) < h and pl < w and (pad_w - pl) < w) else "replicate"
+            video = F.pad(video, (pl, pad_w - pl, pt, pad_h - pt), mode=mode)
+        return video
+
+    def _video_path(self, episode: dict[str, Any], video_key: str) -> str:
+        chunk_idx = int(episode[f"videos/{video_key}/chunk_index"])
+        file_idx = int(episode[f"videos/{video_key}/file_index"])
+        rel = self._info["video_path"].format(
+            video_key=video_key, chunk_index=chunk_idx, file_index=file_idx,
+            episode_chunk=chunk_idx, episode_file=file_idx,
+        )
+        return str(self._root / rel)
+
+    def _build_raw_action(
+        self, observation_rows: list[dict[str, Any]], action_rows: list[dict[str, Any]]
+    ) -> torch.Tensor:
+        action = np.asarray([row[_ACTION_FEATURE] for row in action_rows], dtype=np.float32)
+        action = action[-self._chunk_length :].copy()  # [chunk_length, 14]
+        if self._relative_actions:
+            # Joints relative to the chunk-start observation state (pos = first 14
+            # of observation.state, same layout as action). Grippers stay absolute.
+            obs_ref = np.asarray(observation_rows[0][_STATE_FEATURE], dtype=np.float32)[:14]
+            action[:, _JOINT_DIMS] -= obs_ref[_JOINT_DIMS]
+        return torch.from_numpy(action).float()
+
+    def _build_result(self, *, mode: str, video: torch.Tensor, action: torch.Tensor, ai_caption: str) -> dict[str, Any]:
+        spec = dk1_action_spec()
+        idle_frames = compute_idle_frames(
+            action, spec,
+            eps_t=5e-3 / self._fps, eps_r=np.deg2rad(1.5) / self._fps,
+            eps_g=1e-2, joint_threshold=5e-3 / self._fps, min_streak=3,
+        )
+        normalized_action = normalize_action(action, "quantile", self._load_norm_stats())
+        # Zero-pad the 14-D action up to the model's action width (max_action_dim).
+        raw_dim = normalized_action.shape[-1]
+        if self._max_action_dim > raw_dim:
+            normalized_action = F.pad(normalized_action, (0, self._max_action_dim - raw_dim))
+        formatted_video = (video * 255.0).clamp(0.0, 255.0).to(torch.uint8).permute(1, 0, 2, 3)
+
+        # --- Conditioning plan ---
+        # Vision: first `num_clean_latent_frames` latent frames are clean (the
+        # observation window); the rest of the clip is generated/supervised.
+        t_pixel = video.shape[0]
+        t_latent = 1 + (t_pixel - 1) // self._temporal_compression_factor
+        num_clean = max(0, min(self._num_clean_latent_frames, t_latent - 1))
+        # Action: sample an RTC prefix K in [0, rtc_action_prefix], clamped so at
+        # least one step stays supervised. The first K action steps are clean.
+        if self._rtc_action_prefix > 0:
+            k_max = min(self._rtc_action_prefix, self._chunk_length - 1)
+            k = random.randint(0, k_max)
+        else:
+            k = 0
+        sequence_plan = SequencePlan(
+            has_text=bool(ai_caption),
+            has_vision=True,
+            condition_frame_indexes_vision=list(range(num_clean)),
+            has_action=True,
+            condition_frame_indexes_action=list(range(k)),
+        )
+
+        result = {
+            "ai_caption": ai_caption,
+            "video": formatted_video,
+            "action": normalized_action,
+            "conditioning_fps": torch.tensor(self._fps, dtype=torch.long),
+            "mode": mode,
+            "domain_id": torch.tensor(self._domain_id, dtype=torch.long),
+            "raw_action_dim": torch.tensor(raw_dim, dtype=torch.long),  # 14 — loss masks padding
+            "viewpoint": "concat_view",
+            "idle_frames": torch.tensor(idle_frames, dtype=torch.long),
+            "sequence_plan": sequence_plan,
+            "additional_view_description": (
+                "The top row is the head (third-person) camera. The bottom row contains the "
+                "left-wrist and right-wrist camera views, horizontally concatenated."
+            ),
+        }
+        if self._vlm_tokenizer is not None:
+            ids = tokenize_caption(ai_caption, self._vlm_tokenizer, is_video=True,
+                                   use_system_prompt=False)[:_MAX_TEXT_TOKENS]
+            result["text_token_ids"] = torch.tensor(ids, dtype=torch.long)
+        return result
+
+    def _load_norm_stats(self) -> dict[str, torch.Tensor]:
+        if self._norm_stats is None:
+            self._norm_stats = {
+                k: torch.from_numpy(v).float()
+                for k, v in load_action_stats(self._normalization_path).items()
+            }
+        return self._norm_stats
+
+    def __len__(self) -> int:
+        return max(0, len(self._rows) - self._chunk_length)
+
+
+class DK1BlendedDataset(Dataset):
+    """Weighted blend of per-root DK1LeRobotDatasets exposed as ONE dataset.
+
+    RankPartitionedDataLoader pins one dataset per rank (requires
+    world_size >= num_datasets), so a 21-source blend on 2 GPUs must be a single
+    dataset. __getitem__ samples a sub-dataset by weight, then a random window
+    from it (stochastic weighted mixing — matches the FastWAM blend semantics).
+    """
+
+    def __init__(self, roots_weights, tokenizer_config: Any = None, **ds_kwargs) -> None:
+        super().__init__()
+        # Build the Qwen tokenizer ONCE and share it across all sub-datasets
+        # (avoids 21x tokenizer loads).
+        shared_tok = None
+        if tokenizer_config is not None:
+            shared_tok = lazy_instantiate(tokenizer_config).tokenizer
+            shared_tok, _ = add_special_tokens(shared_tok)
+        self._datasets = []
+        for root, _w in roots_weights:
+            d = DK1LeRobotDataset(root=root, tokenizer_config=None, **ds_kwargs)
+            d._vlm_tokenizer = shared_tok
+            self._datasets.append(d)
+        w = np.asarray([float(x) for _r, x in roots_weights], dtype=np.float64)
+        self._probs = w / w.sum()
+        self._total = int(sum(len(d) for d in self._datasets))
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        di = int(np.random.choice(len(self._datasets), p=self._probs))
+        d = self._datasets[di]
+        return d[random.randrange(len(d))]

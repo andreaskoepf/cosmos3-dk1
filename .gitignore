@@ -1,0 +1,11 @@
+# Large artifacts — not for git
+weights/
+checkpoints/
+outputs/
+hf_staging*/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/

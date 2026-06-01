@@ -1,0 +1,70 @@
+diff --git a/cosmos_framework/configs/base/config.py b/cosmos_framework/configs/base/config.py
+index f7fd14e..b6fa0a2 100644
+--- a/cosmos_framework/configs/base/config.py
++++ b/cosmos_framework/configs/base/config.py
+@@ -98,4 +98,12 @@ def make_config() -> Config:
+     # Register shipped experiments explicitly.
+     import cosmos_framework.configs.base.experiment.sft.vision_sft_nano  # noqa: F401
+     import cosmos_framework.configs.base.experiment.sft.vision_sft_super  # noqa: F401
++
++    # Register external experiment modules listed in $COSMOS_EXTRA_EXPERIMENTS
++    # (comma-separated importable module names; must be on PYTHONPATH). Lets
++    # out-of-tree projects (e.g. cosmos-dk1) register their experiments without
++    # editing this file. Their cs.store(group="experiment", ...) side-effects fire on import.
++    import importlib, os  # noqa: E401
++    for _mod in filter(None, (m.strip() for m in os.environ.get("COSMOS_EXTRA_EXPERIMENTS", "").split(","))):
++        importlib.import_module(_mod)
+     return c
+diff --git a/cosmos_framework/data/vfm/action/domain_utils.py b/cosmos_framework/data/vfm/action/domain_utils.py
+index 917fe4c..a615e72 100644
+--- a/cosmos_framework/data/vfm/action/domain_utils.py
++++ b/cosmos_framework/data/vfm/action/domain_utils.py
+@@ -18,6 +18,7 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
+     "robomind-ur": 13,
+     "agibotworld": 15,
+     "fractal": 20,
++    "dk1": 25,  # DK-1 bimanual, 14D joint-space (added for cosmos-dk1 SFT)
+ }
+ 
+ 
+@@ -33,6 +34,7 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
+     "robomind-ur": 10,
+     "agibotworld": 29,
+     "fractal": 10,
++    "dk1": 14,  # left arm(6) + left gripper(1) + right arm(6) + right gripper(1)
+ }
+ 
+ 
+diff --git a/cosmos_framework/model/vfm/omni_mot_model.py b/cosmos_framework/model/vfm/omni_mot_model.py
+index 9e93f98..4470ea2 100644
+--- a/cosmos_framework/model/vfm/omni_mot_model.py
++++ b/cosmos_framework/model/vfm/omni_mot_model.py
+@@ -4266,12 +4266,27 @@ class OmniMoTModel(ImaginaireModel):
+         from cosmos_framework.utils.vfm.lora import inject_lora_pre_fsdp
+ 
+         self.lora_alpha = lora_alpha
+-        return inject_lora_pre_fsdp(
++        network = inject_lora_pre_fsdp(
+             network,
+             lora_rank=lora_rank,
+             lora_alpha=lora_alpha,
+             lora_target_modules=lora_target_modules,
+         )
++        # Un-freeze selected non-LoRA modules so they train fully alongside LoRA.
++        # LoRA injection froze every non-adapter param; a brand-new embodiment's
++        # action projection (action2llm/llm2action) must be LEARNED, not adapted.
++        # Driven by $LORA_ALSO_TRAIN (comma-separated name substrings).
++        import os
++        also = [t.strip() for t in os.environ.get("LORA_ALSO_TRAIN", "").split(",") if t.strip()]
++        if also:
++            n = 0
++            for name, p in network.named_parameters():
++                if any(t in name for t in also):
++                    p.requires_grad_(True)
++                    n += p.numel()
++            from cosmos_framework.utils import log
++            log.info(f"LoRA: also training {n:,} non-LoRA params matching {also}")
++        return network
+ 
+     def _init_lora_weights_post_materialization(self, network: torch.nn.Module) -> None:
+         """Post-materialization LoRA init — see :func:`init_lora_weights_post_materialization`."""
