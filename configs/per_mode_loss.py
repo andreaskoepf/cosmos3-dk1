@@ -33,6 +33,18 @@ from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import distributed, log
 from cosmos_framework.utils.callback import Callback
 
+# Which modality(ies) each mode actually supervises. The other modality is all-clean
+# for that mode → its per-instance loss is a structural 0 (noisy_mask=0), so logging it
+# is just noise. Unknown modes fall back to both (safe default). Restricting to these
+# pairs leaves only the signal-carrying keys: policy_{vision,action}, causal_policy_action,
+# forward_dynamics_vision, inverse_dynamics_action.
+_MODE_MODALITIES: dict[str, tuple[str, ...]] = {
+    "policy": ("vision", "action"),
+    "causal_policy": ("action",),
+    "forward_dynamics": ("vision",),
+    "inverse_dynamics": ("action",),
+}
+
 
 class PerModeLossCallback(Callback):
     def __init__(self, log_freq: int = 100):
@@ -79,6 +91,8 @@ class PerModeLossCallback(Callback):
                     if pi.numel() != n:  # alignment guard — skip rather than log wrong
                         continue
                     for m, v in zip(modes, pi.tolist()):
+                        if modality not in _MODE_MODALITIES.get(m, ("vision", "action")):
+                            continue  # mode doesn't supervise this modality → structural 0, skip
                         rec = self._acc[(m, modality)]
                         rec[0] += v
                         rec[1] += 1
