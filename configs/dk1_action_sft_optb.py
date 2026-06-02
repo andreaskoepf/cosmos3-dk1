@@ -60,17 +60,20 @@ _DK1_DATAMIX = [
 ]
 
 # Multi-mode training: mode="joint" rolls a mode PER SAMPLE, weighted by mode_probs.
-#   policy (0.5)           — predict actions (+ future video) from 2 obs latents + RTC prefix.
-#   forward_dynamics (0.3) — predict future video from start frame + GIVEN action trajectory (world model).
-#   inverse_dynamics (0.2) — predict actions from the FULLY observed video (non-causal).
-# A packed batch mixes all three, each entry with its own condition mask; the loss
-# follows each mask (FD→video, ID→action, policy→both).
-# RTC (policy only): 25% of policy samples get a clean action prefix K∈[1,8], K~exp(-0.3K).
+#   policy (0.30)          — 2 obs latents clean → predict actions + FUTURE VIDEO (joint imagine+act).
+#   causal_policy (0.30)   — clip truncated to past obs window (no future frames) → predict
+#                            actions from clean past frames only, NO video gen (cheap realtime path).
+#   forward_dynamics(0.25) — start frame + GIVEN action trajectory → predict future video (world model).
+#   inverse_dynamics(0.15) — FULLY observed video → predict actions (non-causal).
+# A packed batch mixes all four, each entry with its own mask; the loss follows each mask.
+# policy+FD (0.55) keep training future-video prediction → shapes the shared video features
+# that causal_policy's action decode reads (the FastWAM finding). RTC applies to policy &
+# causal_policy: with prob 0.25 a clean prefix K∈[1,8] is given, K~exp(-0.3K).
 _DK1_BLEND = L(DK1BlendedDataset)(
     roots_weights=[[root, w] for _name, root, w in _DK1_DATAMIX],
     normalization_path="${oc.env:DK1_ACTION_STATS}",
     fps=30.0, chunk_length=16, mode="joint",
-    mode_probs={"policy": 0.5, "forward_dynamics": 0.3, "inverse_dynamics": 0.2},
+    mode_probs={"policy": 0.30, "causal_policy": 0.30, "forward_dynamics": 0.25, "inverse_dynamics": 0.15},
     num_clean_latent_frames=2,
     rtc_action_prefix=8, rtc_prob=0.25, rtc_decay=0.3,
     relative_actions=True,

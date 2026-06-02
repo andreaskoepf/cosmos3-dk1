@@ -56,7 +56,7 @@ _STATE_FEATURE = "observation.state"  # 40D: pos[:14] = joint+gripper, then vel[
 _JOINT_DIMS = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
 _GRIPPER_DIMS = [6, 13]
 
-_MODE_CHOICES = ("forward_dynamics", "inverse_dynamics", "policy")
+_MODE_CHOICES = ("forward_dynamics", "inverse_dynamics", "policy", "causal_policy")
 
 
 def dk1_action_spec():
@@ -316,6 +316,15 @@ class DK1LeRobotDataset(Dataset):
         raw_dim = normalized_action.shape[-1]
         if self._max_action_dim > raw_dim:
             normalized_action = F.pad(normalized_action, (0, self._max_action_dim - raw_dim))
+        # causal_policy: truncate the clip to the observation (past) window so NO
+        # future video latents enter the sequence — actions then attend only to clean
+        # past frames (causal; matches realtime inference where future frames don't
+        # exist). obs_pixel pixel frames encode to num_clean_latent_frames latents
+        # (t_latent = 1 + (obs_pixel-1)//tcf). This is the only mode that drops frames.
+        if mode == "causal_policy":
+            tcf = self._temporal_compression_factor
+            obs_pixel = 1 + max(0, self._num_clean_latent_frames - 1) * tcf
+            video = video[:obs_pixel]
         formatted_video = (video * 255.0).clamp(0.0, 255.0).to(torch.uint8).permute(1, 0, 2, 3)
 
         # --- Conditioning plan ---
@@ -332,17 +341,24 @@ class DK1LeRobotDataset(Dataset):
         #   forward_dynamics : first `num_clean` video latents clean + ALL actions
         #                      clean (trajectory given) → predict future video (world model).
         #   inverse_dynamics : ALL video latents clean + NO actions clean → predict
-        #                      all actions from the fully-observed video.
+        #                      all actions from the fully-observed (full-clip) video.
+        #   causal_policy    : clip already truncated to the past obs window above, so
+        #                      ALL its (past) latents are clean + RTC action prefix →
+        #                      predict the action chunk from past frames only, NO video
+        #                      generation (cheap, causal — realtime inference path).
         if mode == "forward_dynamics":
             vision_clean = list(range(num_clean))
             action_clean = list(range(self._chunk_length))
         elif mode == "inverse_dynamics":
             vision_clean = list(range(t_latent))
             action_clean = []
-        else:  # policy — RTC (FastWAM parity): with prob rtc_prob, give a clean action
-            # prefix of length K∈[1,k_max], P(K=k) ∝ exp(-rtc_decay·k) (short favored);
-            # else K=0 (cold start). rtc_action_prefix==0 disables RTC.
-            vision_clean = list(range(num_clean))
+        else:  # policy / causal_policy — both predict the action chunk with an optional
+            # RTC clean prefix; they differ only in which video latents are clean.
+            # causal_policy already dropped future frames (truncated clip) → all present
+            # latents clean; policy keeps the full clip → only the first num_clean clean
+            # (future video generated). RTC (FastWAM parity): with prob rtc_prob a clean
+            # prefix K∈[1,k_max] is given, P(K=k) ∝ exp(-rtc_decay·k); else K=0 (cold start).
+            vision_clean = list(range(t_latent)) if mode == "causal_policy" else list(range(num_clean))
             k = 0
             if self._rtc_action_prefix > 0 and random.random() < self._rtc_prob:
                 k_max = min(self._rtc_action_prefix, self._chunk_length - 1)
