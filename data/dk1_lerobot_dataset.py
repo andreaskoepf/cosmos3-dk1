@@ -157,11 +157,13 @@ class DK1LeRobotDataset(Dataset):
         # padding (which would inject redundant pixels).
         head_height_frac: float = 2.0 / 3.0,
         # How cameras are fit to the bucket (configurable for ablation):
-        #   "crop" — resize-to-cover + center-crop each cam to fill the bucket exactly
-        #            (FastWAM-style; real pixels, no borders, but crops some FOV).
-        #   "pad"  — tile head + half-size wrists, downscale-to-fit, center reflection-pad
-        #            (keeps full FOV but injects redundant mirrored borders).
-        # head_height_frac applies to "crop" only.
+        #   "crop"    — resize-to-cover + center-crop each cam to fill its tile exactly
+        #               (FastWAM-style; real pixels, no borders, crops some FOV).
+        #   "stretch" — resize each cam straight to its tile, IGNORING aspect ratio
+        #               (full FOV, no borders, but distorts geometry).
+        #   "pad"     — tile head + half-size wrists, downscale-to-fit, center reflection-pad
+        #               (keeps full FOV + aspect, but injects redundant mirrored borders).
+        # head_height_frac sets the head/wrist height split for "crop" and "stretch".
         video_fit_mode: str = "crop",
     ) -> None:
         super().__init__()
@@ -194,8 +196,8 @@ class DK1LeRobotDataset(Dataset):
         self._rtc_prob = float(rtc_prob)
         self._rtc_decay = float(rtc_decay)
         self._head_height_frac = float(head_height_frac)
-        if video_fit_mode not in ("crop", "pad"):
-            raise ValueError(f"video_fit_mode must be 'crop' or 'pad', got {video_fit_mode!r}")
+        if video_fit_mode not in ("crop", "pad", "stretch"):
+            raise ValueError(f"video_fit_mode must be 'crop'|'pad'|'stretch', got {video_fit_mode!r}")
         self._video_fit_mode = str(video_fit_mode)
         self._caption_idle_frames = bool(caption_idle_frames)
         self._cfg_dropout = float(cfg_dropout)
@@ -317,17 +319,24 @@ class DK1LeRobotDataset(Dataset):
             tiled = torch.cat([top, torch.cat([left, right], dim=-1)], dim=-2)
             return self._fit_to_bucket(tiled)
 
-        # "crop" (default): resize-crop (cover + center-crop) each camera so the composite
-        # EXACTLY fills the (H, W) bucket — no mirror/replicate padding. Head gets the top
-        # `head_height_frac` of the height (full width); the two wrists split the bottom.
+        # "crop"/"stretch": fit each camera to a tile so the composite EXACTLY fills the
+        # (H, W) bucket — no padding. Head gets the top `head_height_frac` of the height
+        # (full width); the two wrists split the bottom. crop=cover+center-crop (keep aspect),
+        # stretch=resize-to-tile (give up aspect).
         H, W = self._video_hw
         head_h = max(1, round(H * self._head_height_frac))
         wrist_h = H - head_h
         left_w = W // 2
         right_w = W - left_w
-        top = self._resize_crop(decode(_TOP_VIEW), head_h, W)
-        left = self._resize_crop(decode(_BOTTOM_LEFT), wrist_h, left_w)
-        right = self._resize_crop(decode(_BOTTOM_RIGHT), wrist_h, right_w)
+
+        def fit(img: torch.Tensor, h: int, w: int) -> torch.Tensor:
+            if self._video_fit_mode == "stretch":
+                return F.interpolate(img, size=(h, w), mode="bilinear", align_corners=False)
+            return self._resize_crop(img, h, w)
+
+        top = fit(decode(_TOP_VIEW), head_h, W)
+        left = fit(decode(_BOTTOM_LEFT), wrist_h, left_w)
+        right = fit(decode(_BOTTOM_RIGHT), wrist_h, right_w)
         bottom = torch.cat([left, right], dim=-1)  # [T,3,wrist_h,W]
         return torch.cat([top, bottom], dim=-2)    # [T,3,H,W] — exact, no padding
 
