@@ -36,7 +36,7 @@ from cosmos_framework.data.vfm.action.action_normalization import load_action_st
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import distributed, log
 
-from dk1_lerobot_dataset import DK1LeRobotDataset
+from dk1_lerobot_dataset import DK1LeRobotDataset, _ACTION_FEATURE
 
 # dk1 14-D layout for plotting: left arm(0-5), left grip(6), right arm(7-12), right grip(13)
 _PLOT_GROUPS = [
@@ -89,11 +89,36 @@ class EveryNActionViz(EveryN):
             # randomness, only the last-N eval episodes.
             kw.update(mode=mode, mode_probs=None, rtc_prob=0.0, cfg_dropout=0.0, split="eval")
             ds = DK1LeRobotDataset(root=self.eval_root, **kw)
-            n = min(self.n_samples, len(ds))
-            idxs = [int(i * (len(ds) // max(n, 1))) for i in range(n)]
+            idxs = self._high_motion_indices(ds, min(self.n_samples, len(ds)))
             self._cache[mode] = [ds[i] for i in idxs]
-        log.info(f"[action-viz] cached eval samples: "
+        log.info(f"[action-viz] cached eval samples (high-motion): "
                  + ", ".join(f"{m}={len(v)}" for m, v in self._cache.items()))
+
+    @staticmethod
+    def _high_motion_indices(ds, n: int, n_candidates: int = 300) -> list[int]:
+        """Pick the n windows with the MOST joint motion (static segments are
+        uninformative for judging motion prediction). Scores candidates cheaply from
+        the raw joint actions (no video decode): total per-joint range over the chunk."""
+        N = len(ds)
+        if N == 0 or n <= 0:
+            return []
+        joint = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
+        cl = ds._chunk_length
+        cand = list(range(0, N, max(1, N // n_candidates)))
+
+        def motion(i: int) -> float:
+            s = ds._valid_starts[i]
+            a = np.asarray([ds._rows[s + t][_ACTION_FEATURE] for t in range(cl)], dtype=np.float32)[:, joint]
+            return float((a.max(0) - a.min(0)).sum())  # total joint range over the chunk
+
+        cand.sort(key=motion, reverse=True)
+        picked: list[int] = []
+        for i in cand:  # greedily take highest-motion windows, spaced ≥2 chunks apart (distinct clips)
+            if all(abs(i - p) >= 2 * cl for p in picked):
+                picked.append(i)
+                if len(picked) >= n:
+                    break
+        return sorted(picked) if picked else sorted(cand[:n])
 
     def _build_batch(self, samples: list[dict]) -> dict:
         device = "cuda"
