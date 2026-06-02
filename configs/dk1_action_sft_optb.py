@@ -78,6 +78,9 @@ _DK1_BLEND = L(DK1BlendedDataset)(
     mode_probs={"policy": 0.30, "causal_policy": 0.30, "forward_dynamics": 0.25, "inverse_dynamics": 0.15},
     num_clean_latent_frames=2,
     rtc_action_prefix=8, rtc_prob=0.25, rtc_decay=0.3,
+    # Framework-parity caption: enrich with viewpoint/duration/fps/resolution JSON
+    # (matches DROID training + inference _format_prompt) + CFG dropout for guidance.
+    caption_metadata=True, cfg_dropout=0.1,
     relative_actions=True,
     tokenizer_config="${model.config.vlm_config.tokenizer}",
     video_hw=(544, 736),

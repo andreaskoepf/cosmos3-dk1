@@ -38,6 +38,7 @@ from torch.utils.data import Dataset
 from cosmos_framework.data.vfm.action.action_normalization import load_action_stats, normalize_action
 from cosmos_framework.data.vfm.action.action_spec import Gripper, Joint, build_action_spec
 from cosmos_framework.data.vfm.action.domain_utils import get_domain_id
+from cosmos_framework.data.vfm.action.json_formatter import ActionPromptJsonFormatter
 from cosmos_framework.data.vfm.action.pose_utils import compute_idle_frames
 from cosmos_framework.data.vfm.sequence_packing import SequencePlan, add_special_tokens
 from cosmos_framework.model.vfm.vlm.qwen3_vl.utils import tokenize_caption
@@ -132,6 +133,17 @@ class DK1LeRobotDataset(Dataset):
         # needs video_reader_rs.libs on LD_LIBRARY_PATH) or "lerobot" (torchcodec
         # CPU, by timestamp). video_reader_rs hides the GPU-starving CPU decode.
         video_backend: str = "video_reader_rs",
+        # Caption handling (framework parity with ActionTransformPipeline). When
+        # caption_metadata=True, the plain task caption is enriched via
+        # ActionPromptJsonFormatter into a structured JSON string carrying viewpoint,
+        # duration, fps and resolution before tokenization — matching how DROID/Cosmos
+        # action training and the inference _format_prompt build the prompt. When
+        # caption_idle_frames=True, Pi0.7-style idle/total action-frame metadata is
+        # also added. cfg_dropout replaces the caption with "" with that probability
+        # (classifier-free-guidance dropout — required to enable CFG at inference).
+        caption_metadata: bool = False,
+        caption_idle_frames: bool = False,
+        cfg_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self._video_hw = (int(video_hw[0]), int(video_hw[1]))
@@ -162,6 +174,18 @@ class DK1LeRobotDataset(Dataset):
         self._rtc_action_prefix = int(rtc_action_prefix)
         self._rtc_prob = float(rtc_prob)
         self._rtc_decay = float(rtc_decay)
+        self._caption_idle_frames = bool(caption_idle_frames)
+        self._cfg_dropout = float(cfg_dropout)
+        self._caption_formatter = (
+            ActionPromptJsonFormatter(
+                viewpoint_templates={
+                    "concat_view": "Top row: head (third-person) camera. "
+                    "Bottom row: left-wrist and right-wrist cameras."
+                }
+            )
+            if caption_metadata
+            else None
+        )
         self._normalization_path = str(normalization_path)
         self._domain_id = get_domain_id("dk1")
         self._norm_stats: dict[str, torch.Tensor] | None = None
@@ -393,8 +417,31 @@ class DK1LeRobotDataset(Dataset):
                 "left-wrist and right-wrist camera views, horizontally concatenated."
             ),
         }
+        # Caption: classifier-free-guidance dropout (empty caption with prob cfg_dropout
+        # → unconditional sample, enables CFG at inference) OR framework-parity metadata
+        # enrichment (viewpoint/duration/fps/resolution as a JSON string). A fresh dict
+        # is passed to the formatter (it mutates/pops its input) so `result` is untouched.
+        caption = ai_caption
+        if self._cfg_dropout > 0.0 and random.random() < self._cfg_dropout:
+            caption = ""
+        elif self._caption_formatter is not None and caption:
+            fmt_input: dict[str, Any] = {
+                "ai_caption": caption,
+                "viewpoint": "concat_view",
+                "video": formatted_video,  # [C, T, H, W] — formatter reads shape[1] for duration
+                "conditioning_fps": result["conditioning_fps"],
+                "image_size": torch.tensor(self._video_hw, dtype=torch.long),  # [H, W]
+                "action": normalized_action,
+                "mode": mode,
+            }
+            if self._caption_idle_frames:
+                fmt_input["idle_frames"] = result["idle_frames"]
+                fmt_input["idle_frames_total"] = torch.tensor(self._chunk_length, dtype=torch.long)
+            cap_obj = self._caption_formatter(fmt_input)[self._caption_formatter.caption_key]
+            caption = json.dumps(cap_obj) if isinstance(cap_obj, dict) else cap_obj
+        result["ai_caption"] = caption
         if self._vlm_tokenizer is not None:
-            ids = tokenize_caption(ai_caption, self._vlm_tokenizer, is_video=True,
+            ids = tokenize_caption(caption, self._vlm_tokenizer, is_video=True,
                                    use_system_prompt=False)[:_MAX_TEXT_TOKENS]
             result["text_token_ids"] = torch.tensor(ids, dtype=torch.long)
         return result
