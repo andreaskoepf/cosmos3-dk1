@@ -50,9 +50,10 @@ class EveryNActionViz(EveryN):
     def __init__(
         self,
         every_n: int,
-        eval_root: str,
+        eval_roots: list[str],
         dataset_kwargs: dict,
-        n_samples: int = 2,
+        n_samples: int = 2,                 # # of FIXED high-motion anchors (each from a distinct dataset)
+        add_random: bool = True,            # + 1 fully-random clip per eval (whole task distribution)
         action_modes: list[str] | None = None,
         video_modes: list[str] | None = None,
         guidance: float = 1.5,
@@ -63,32 +64,61 @@ class EveryNActionViz(EveryN):
     ) -> None:
         super().__init__(every_n, step_size, run_at_start=run_at_start)
         self.name = self.__class__.__name__
-        self.eval_root = eval_root
+        self.eval_roots = list(eval_roots) if isinstance(eval_roots, (list, tuple)) else [eval_roots]
         self.dataset_kwargs = dict(dataset_kwargs)
         self.n_samples = int(n_samples)
+        self.add_random = bool(add_random)
         self.action_modes = action_modes or ["policy", "causal_policy"]
         self.video_modes = video_modes or ["policy", "forward_dynamics"]
         self.guidance = float(guidance)
         self.num_steps = int(num_steps)
         self.fps = int(fps)
-        self._cache: dict[str, list[dict]] = {}     # mode -> list of raw sample dicts
+        self._modes = sorted(set(self.action_modes) | set(self.video_modes))
+        self._ds_cache: dict[tuple, "DK1LeRobotDataset"] = {}   # (root, mode) -> eval dataset (lazy)
+        self._anchors: list[tuple[str, int]] | None = None      # fixed [(root, window_idx)], distinct datasets
         self._raw_dim = 14
 
-    # ---- fixed eval-sample construction (once) ----
-    def _ensure_samples(self) -> None:
-        if self._cache:
-            return
-        modes = sorted(set(self.action_modes) | set(self.video_modes))
-        for mode in modes:
+    def _get_ds(self, root: str, mode: str):
+        """Mode-pinned eval dataset for a root (lazy, cached). No tokenizer needed — the
+        sampler tokenizes ai_caption itself — so these are cheap to build."""
+        key = (root, mode)
+        if key not in self._ds_cache:
             kw = dict(self.dataset_kwargs)
-            # deterministic eval on the HELD-OUT split: pin the mode, no RTC/caption
-            # randomness, only the last-N eval episodes.
-            kw.update(mode=mode, mode_probs=None, rtc_prob=0.0, cfg_dropout=0.0, split="eval")
-            ds = DK1LeRobotDataset(root=self.eval_root, **kw)
-            idxs = self._high_motion_indices(ds, min(self.n_samples, len(ds)))
-            self._cache[mode] = [ds[i] for i in idxs]
-        log.info(f"[action-viz] cached eval samples (high-motion): "
-                 + ", ".join(f"{m}={len(v)}" for m, v in self._cache.items()))
+            kw.update(mode=mode, mode_probs=None, rtc_prob=0.0, cfg_dropout=0.0,
+                      split="eval", tokenizer_config=None)
+            self._ds_cache[key] = DK1LeRobotDataset(root=root, **kw)
+        return self._ds_cache[key]
+
+    def _ensure_anchors(self) -> None:
+        """Pick n_samples FIXED high-motion anchors, each from a DISTINCT dataset (when
+        >1 root). Motion is mode-independent, so score with any mode."""
+        if self._anchors is not None:
+            return
+        m0 = self._modes[0]
+        roots = self.eval_roots
+        n = min(self.n_samples, len(roots)) if len(roots) > 1 else self.n_samples
+        step = max(1, len(roots) // max(n, 1))
+        chosen = [roots[(i * step) % len(roots)] for i in range(n)] if len(roots) > 1 else roots * n
+        anchors: list[tuple[str, int]] = []
+        for root in chosen[:self.n_samples]:
+            ds = self._get_ds(root, m0)
+            idx = self._high_motion_indices(ds, 1)
+            if idx:
+                anchors.append((root, idx[0]))
+        self._anchors = anchors
+        from pathlib import Path
+        log.info("[action-viz] fixed high-motion anchors: "
+                 + ", ".join(f"{Path(r).name}#{i}" for r, i in anchors))
+
+    def _random_spec(self, iteration: int) -> tuple[str, int]:
+        """A fully-random eval clip (random dataset + random window). Seeded by `iteration`
+        so all FSDP ranks pick the SAME spec (avoids collective mismatch) but it varies
+        each eval → samples the whole task distribution over time."""
+        import random
+        rng = random.Random(int(iteration) * 2654435761 & 0xFFFFFFFF)
+        root = rng.choice(self.eval_roots)
+        ds = self._get_ds(root, self._modes[0])
+        return root, (rng.randrange(len(ds)) if len(ds) else 0)
 
     @staticmethod
     def _high_motion_indices(ds, n: int, n_candidates: int = 300) -> list[int]:
@@ -168,41 +198,51 @@ class EveryNActionViz(EveryN):
     @torch.no_grad()
     def every_n_impl(self, trainer, model: ImaginaireModel, data_batch, output_batch, loss, iteration: int) -> None:
         try:
-            self._ensure_samples()
+            self._ensure_anchors()
+            # specs (root, window_idx) + labels: fixed anchors (a0,a1,...) from distinct
+            # datasets + one fully-random clip per eval (whole task distribution).
+            specs = list(self._anchors)
+            labels = [f"a{k}" for k in range(len(specs))]
+            if self.add_random:
+                specs.append(self._random_spec(iteration)); labels.append("rand")
             info: dict[str, Any] = {}
-            for mode, samples in self._cache.items():
+            for mode in self._modes:
+                samples = [self._get_ds(r, mode)[i] for (r, i) in specs]
                 batch = self._build_batch(samples)
-                seeds = list(range(len(samples)))
                 out = model.generate_samples_from_batch(
-                    batch, guidance=self.guidance, num_steps=self.num_steps, seed=seeds,
+                    batch, guidance=self.guidance, num_steps=self.num_steps, seed=list(range(len(samples))),
                 )
                 if not distributed.is_rank0() or wandb.run is None:
                     continue
-                # ----- action plot (action modes) -----
+                # ----- action plots (action modes): one per spec -----
                 if mode in self.action_modes and out.get("action") is not None:
-                    mses = []
-                    for s in range(min(len(samples), len(out["action"]))):  # one plot per cached sample
-                        gt = self._to_np(samples[s]["action"])            # normalized GT
-                        pred = self._to_np(out["action"][s])              # normalized pred
+                    anchor_mses = []
+                    for k in range(min(len(samples), len(out["action"]))):
+                        gt = self._to_np(samples[k]["action"])            # normalized GT
+                        pred = self._to_np(out["action"][k])              # normalized pred
                         Tm = min(gt.shape[0], pred.shape[0])
                         fig = self._action_figure(mode, gt[:Tm], pred[:Tm])
-                        info[f"action_viz/{mode}_chunk_s{s}"] = wandb.Image(fig)
+                        info[f"action_viz/{mode}_chunk_{labels[k]}"] = wandb.Image(fig)
                         plt.close(fig)
-                        mses.append(float(np.mean((gt[:Tm] - pred[:Tm]) ** 2)))
-                    if mses:
-                        info[f"action_viz/{mode}_mse"] = float(np.mean(mses))  # avg over samples
-                # ----- video (video modes): one per cached sample -----
+                        mse = float(np.mean((gt[:Tm] - pred[:Tm]) ** 2))
+                        if labels[k] == "rand":
+                            info[f"action_viz/{mode}_mse_rand"] = mse   # noisy, whole-distribution sample
+                        else:
+                            anchor_mses.append(mse)
+                    if anchor_mses:
+                        info[f"action_viz/{mode}_mse"] = float(np.mean(anchor_mses))  # clean trend (fixed anchors)
+                # ----- video (video modes): one per spec -----
                 if mode in self.video_modes and out.get("vision") is not None:
-                    for s in range(min(len(samples), len(out["vision"]))):
-                        vlat = out["vision"][s]  # already [B=1, C=48, T, H, W] from the sampler
+                    for k in range(min(len(samples), len(out["vision"]))):
+                        vlat = out["vision"][k]  # already [B=1, C=48, T, H, W] from the sampler
                         if vlat.dim() == 4:
                             vlat = vlat.unsqueeze(0)
                         pred_vid = model.decode(vlat).squeeze(0)  # [C,T,H,W]
-                        gt_np = self._to_video_np(samples[s]["video"])
+                        gt_np = self._to_video_np(samples[k]["video"])
                         pred_np = self._to_video_np(pred_vid)
                         Tm = min(gt_np.shape[0], pred_np.shape[0])
                         pair = np.concatenate([gt_np[:Tm], pred_np[:Tm]], axis=3)  # side-by-side on W
-                        info[f"action_viz/{mode}_video_gt_vs_pred_s{s}"] = wandb.Video(pair, fps=self.fps, format="mp4")
+                        info[f"action_viz/{mode}_video_gt_vs_pred_{labels[k]}"] = wandb.Video(pair, fps=self.fps, format="mp4")
             if distributed.is_rank0() and wandb.run is not None and info:
                 info["trainer/global_step"] = iteration
                 wandb.log(info, step=iteration)

@@ -150,9 +150,9 @@ dk1_action_sft_optb = LazyDict(
                 action_viz=L(EveryNActionViz)(
                     every_n=int(os.environ.get("ACTION_VIZ_EVERY_N", "250")),
                     run_at_start=True,
-                    eval_root="/workspace/data/dk1_black_and_white_swan_2026-05-13",
+                    eval_roots=[root for _name, root, _w in _DK1_DATAMIX],  # anchors span distinct datasets
                     dataset_kwargs=_VIZ_DS_KWARGS,
-                    n_samples=2, guidance=1.5, num_steps=20, fps=30,
+                    n_samples=2, add_random=True, guidance=1.5, num_steps=20, fps=30,
                     action_modes=["policy", "causal_policy"],
                     video_modes=["policy", "forward_dynamics"],
                 ),
