@@ -68,3 +68,55 @@ index 9e93f98..4470ea2 100644
  
      def _init_lora_weights_post_materialization(self, network: torch.nn.Module) -> None:
          """Post-materialization LoRA init — see :func:`init_lora_weights_post_materialization`."""
+diff --git a/cosmos_framework/utils/vfm/lora.py b/cosmos_framework/utils/vfm/lora.py
+index 8bffe56..5900944 100644
+--- a/cosmos_framework/utils/vfm/lora.py
++++ b/cosmos_framework/utils/vfm/lora.py
+@@ -74,15 +74,26 @@ def _inject_lora_inplace(
+ ) -> int:
+     """Replace each ``<target>`` ``nn.Linear`` child in-place with ``LoraInjectedLinear``.
+ 
+-    Match is by exact child name (e.g., ``q_proj_moe_gen``), not substring.
++    Two target forms are supported:
++      - bare leaf name (e.g. ``q_proj_moe_gen``) — matches by exact child name.
++      - dotted path suffix (e.g. ``mlp_moe_gen.gate_proj``) — matches when the
++        child's FULL module path ends with the target. This disambiguates leaves
++        that are shared across experts (the gen MLP ``mlp_moe_gen.gate_proj`` vs the
++        frozen reasoner ``mlp.gate_proj`` both have leaf ``gate_proj``), so MLP LoRA
++        can be confined to the generation expert.
++
+     Snapshots ``named_modules()`` before mutating the tree so newly-inserted
+     LoRA submodules are not re-visited.
+     """
+-    target_set = set(target_modules)
++    leaf_targets = {t for t in target_modules if "." not in t}
++    path_targets = [t for t in target_modules if "." in t]
+     replaced = 0
+-    for _parent_name, parent in list(network.named_modules()):
++    for parent_name, parent in list(network.named_modules()):
+         for child_name, child in list(parent.named_children()):
+-            if child_name in target_set and isinstance(child, nn.Linear):
++            if not isinstance(child, nn.Linear):
++                continue
++            full_name = f"{parent_name}.{child_name}" if parent_name else child_name
++            if child_name in leaf_targets or any(full_name.endswith(pt) for pt in path_targets):
+                 setattr(parent, child_name, LoraInjectedLinear(child, rank, alpha))
+                 replaced += 1
+     return replaced
+@@ -121,8 +132,14 @@ def inject_lora_pre_fsdp(
+     if not target_modules_list:
+         raise ValueError("LoRA target_modules cannot be empty")
+ 
+-    model_module_names = {name.split(".")[-1] for name, _ in network.named_modules()}
+-    invalid_modules = [t for t in target_modules_list if t not in model_module_names]
++    all_module_names = [name for name, _ in network.named_modules()]
++    leaf_module_names = {name.split(".")[-1] for name in all_module_names}
++    invalid_modules = [
++        t
++        for t in target_modules_list
++        if (t not in leaf_module_names)
++        and not (("." in t) and any(n.endswith(t) for n in all_module_names))
++    ]
+     if invalid_modules:
+         log.warning(f"LoRA target modules not found in model: {invalid_modules}")
+ 

@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: OpenMDW-1.1
+#
+# dk1_action_sft_optb — "Option B" gen-expert SFT of Cosmos3-Nano on the DK-1 datamix.
+#   - gen ATTENTION (q/k/v/o_moe_gen, ~1.51B) FULL fine-tuned (via $LORA_ALSO_TRAIN + keys_to_select)
+#   - gen MLP (mlp_moe_gen.{gate,up,down}_proj, ~5.44B) LoRA-adapted (path-qualified → gen only)
+#   - action I/O (action2llm/llm2action/action_modality_embed) FULL fine-tuned
+#   - RTC training ENABLED (rtc_prob=0.25, prefix=8) — set in the .py blend.
+# Layered on configs/dk1_action_sft_optb.py. Env from scripts/launch_dk1_sft_optb.sh.
+
+[job]
+task         = "vfm"
+experiment   = "dk1_action_sft_optb"
+project      = "dk1-cosmos-sft"
+group        = "sft"
+name         = "dk1_action_sft_optb"
+wandb_mode   = "online"
+
+[model]
+max_num_tokens_after_packing = 65536
+joint_attn_implementation    = "two_way"
+precision                    = "bfloat16"
+# LoRA confined to the GEN MLP via path-qualified targets (matcher patched to match
+# full module path, so the frozen reasoner's mlp.* is NOT hit). Attention is full-FT,
+# so it is intentionally NOT a LoRA target here.
+lora_enabled                 = true
+lora_rank                    = 16
+lora_alpha                   = 32
+lora_target_modules          = "mlp_moe_gen.gate_proj,mlp_moe_gen.up_proj,mlp_moe_gen.down_proj"
+
+[model.ema]
+enabled         = false
+
+[model.parallelism]
+data_parallel_shard_degree      = -1
+data_parallel_replicate_degree  = 1
+
+[model.compile]
+enabled                         = false
+compile_dynamic                 = true
+
+[model.activation_checkpointing]
+mode                = "full"
+save_ops_regex      = ["fmha"]
+preserve_rng_state  = true
+determinism_check   = "default"
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+betas          = [0.9, 0.95]
+eps            = 1.0e-6
+fused          = true
+# Trains: MLP LoRA adapters (lora_), the action I/O (full), AND the gen attention
+# q/k/v/o_moe_gen (full). $LORA_ALSO_TRAIN must un-freeze the same attention+action
+# modules (see launcher) so requires_grad matches this optimizer selection.
+keys_to_select = ["lora_", "action2llm", "llm2action", "action_modality_embed",
+                  "q_proj_moe_gen", "k_proj_moe_gen", "v_proj_moe_gen", "o_proj_moe_gen"]
+lr             = 5.0e-4
+weight_decay   = 0
+
+[scheduler]
+cycle_lengths      = [25000]
+f_max              = [1.0]
+f_min              = [0.0]
+f_start            = [0.0]
+verbosity_interval = 0
+warm_up_steps      = [2000]
+
+[trainer]
+distributed_parallelism = "fsdp"
+grad_accum_iter         = 2
+logging_iter            = 1
+max_iter                = 25000
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 1.0
+force_finite = true
+
+[checkpoint]
+keys_to_skip_loading = ["net_ema.", "lora_"]   # MLP LoRA fresh-init; attention/action load from base
+load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter            = 5000
+
+[dataloader_train]
+max_sequence_length = 65536

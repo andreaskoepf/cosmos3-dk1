@@ -23,6 +23,7 @@ right_arm(6), right_gripper(1)] = 14D, indices 0..13.
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -87,11 +88,20 @@ class DK1LeRobotDataset(Dataset):
         # (matches FastWAM's 5-obs window: 1 + (5-1)//4 = 2). 0 → pure generation.
         num_clean_latent_frames: int = 2,
         temporal_compression_factor: int = 4,
-        # RTC action prefix: max number of clean/conditioning action steps. When
-        # > 0, K is sampled uniformly in [0, rtc_action_prefix] per sample (random
-        # prefix, RTC-style) — the first K action steps are given clean and the
-        # rest predicted. 0 → predict the whole chunk (no action conditioning).
+        # RTC action prefix: MAX number of clean/conditioning action steps (the
+        # rtc_max_prefix knob). When > 0 and the per-sample RTC gate fires (see
+        # rtc_prob), the first K action steps are given clean and the rest predicted.
+        # 0 → predict the whole chunk (no action conditioning, RTC disabled).
         rtc_action_prefix: int = 0,
+        # RTC probability: per-sample chance of applying a (nonzero) clean action
+        # prefix when rtc_action_prefix>0. Mirrors FastWAM's rtc_prob. 1.0 → every
+        # sample gets a prefix; 0.25 → 25% conditioned, 75% cold-start (K=0). No
+        # effect when rtc_action_prefix==0.
+        rtc_prob: float = 1.0,
+        # RTC prefix-length decay: when the gate fires, K∈[1,k_max] is sampled with
+        # P(K=k) ∝ exp(-rtc_decay·k) (FastWAM parity — short prefixes favored).
+        # 0.0 → uniform over [1, k_max].
+        rtc_decay: float = 0.3,
         # Action target representation:
         #   True  → joint dims RELATIVE to the chunk-start obs state
         #           (observation.state[:14]); grippers absolute. Stats must be
@@ -132,6 +142,8 @@ class DK1LeRobotDataset(Dataset):
         self._num_clean_latent_frames = int(num_clean_latent_frames)
         self._temporal_compression_factor = int(temporal_compression_factor)
         self._rtc_action_prefix = int(rtc_action_prefix)
+        self._rtc_prob = float(rtc_prob)
+        self._rtc_decay = float(rtc_decay)
         self._normalization_path = str(normalization_path)
         self._domain_id = get_domain_id("dk1")
         self._norm_stats: dict[str, torch.Tensor] | None = None
@@ -290,13 +302,19 @@ class DK1LeRobotDataset(Dataset):
         t_pixel = video.shape[0]
         t_latent = 1 + (t_pixel - 1) // self._temporal_compression_factor
         num_clean = max(0, min(self._num_clean_latent_frames, t_latent - 1))
-        # Action: sample an RTC prefix K in [0, rtc_action_prefix], clamped so at
-        # least one step stays supervised. The first K action steps are clean.
-        if self._rtc_action_prefix > 0:
+        # Action RTC (FastWAM parity): with prob rtc_prob, give a clean action prefix
+        # of length K∈[1,k_max] sampled with P(K=k) ∝ exp(-rtc_decay·k) (short
+        # prefixes favored); otherwise K=0 (cold start). k_max clamped so ≥1 step
+        # stays supervised. rtc_action_prefix==0 disables RTC entirely.
+        k = 0
+        if self._rtc_action_prefix > 0 and random.random() < self._rtc_prob:
             k_max = min(self._rtc_action_prefix, self._chunk_length - 1)
-            k = random.randint(0, k_max)
-        else:
-            k = 0
+            if self._rtc_decay > 0 and k_max > 1:
+                ks = range(1, k_max + 1)
+                weights = [math.exp(-self._rtc_decay * kk) for kk in ks]
+                k = random.choices(list(ks), weights=weights, k=1)[0]
+            else:
+                k = random.randint(1, k_max)
         sequence_plan = SequencePlan(
             has_text=bool(ai_caption),
             has_vision=True,
