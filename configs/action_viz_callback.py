@@ -180,26 +180,29 @@ class EveryNActionViz(EveryN):
                     continue
                 # ----- action plot (action modes) -----
                 if mode in self.action_modes and out.get("action") is not None:
-                    s = 0
-                    gt = self._to_np(samples[s]["action"])            # normalized GT
-                    pred = self._to_np(out["action"][s])              # normalized pred
-                    Tm = min(gt.shape[0], pred.shape[0])
-                    fig = self._action_figure(mode, gt[:Tm], pred[:Tm])
-                    info[f"action_viz/{mode}_chunk"] = wandb.Image(fig)
-                    plt.close(fig)
-                    info[f"action_viz/{mode}_mse"] = float(np.mean((gt[:Tm] - pred[:Tm]) ** 2))
-                # ----- video (video modes) -----
+                    mses = []
+                    for s in range(min(len(samples), len(out["action"]))):  # one plot per cached sample
+                        gt = self._to_np(samples[s]["action"])            # normalized GT
+                        pred = self._to_np(out["action"][s])              # normalized pred
+                        Tm = min(gt.shape[0], pred.shape[0])
+                        fig = self._action_figure(mode, gt[:Tm], pred[:Tm])
+                        info[f"action_viz/{mode}_chunk_s{s}"] = wandb.Image(fig)
+                        plt.close(fig)
+                        mses.append(float(np.mean((gt[:Tm] - pred[:Tm]) ** 2)))
+                    if mses:
+                        info[f"action_viz/{mode}_mse"] = float(np.mean(mses))  # avg over samples
+                # ----- video (video modes): one per cached sample -----
                 if mode in self.video_modes and out.get("vision") is not None:
-                    s = 0
-                    vlat = out["vision"][s]  # already [B=1, C=48, T, H, W] from the sampler
-                    if vlat.dim() == 4:
-                        vlat = vlat.unsqueeze(0)
-                    pred_vid = model.decode(vlat).squeeze(0)  # [C,T,H,W]
-                    gt_np = self._to_video_np(samples[s]["video"])
-                    pred_np = self._to_video_np(pred_vid)
-                    Tm = min(gt_np.shape[0], pred_np.shape[0])
-                    pair = np.concatenate([gt_np[:Tm], pred_np[:Tm]], axis=3)  # side-by-side on W
-                    info[f"action_viz/{mode}_video_gt_vs_pred"] = wandb.Video(pair, fps=self.fps, format="mp4")
+                    for s in range(min(len(samples), len(out["vision"]))):
+                        vlat = out["vision"][s]  # already [B=1, C=48, T, H, W] from the sampler
+                        if vlat.dim() == 4:
+                            vlat = vlat.unsqueeze(0)
+                        pred_vid = model.decode(vlat).squeeze(0)  # [C,T,H,W]
+                        gt_np = self._to_video_np(samples[s]["video"])
+                        pred_np = self._to_video_np(pred_vid)
+                        Tm = min(gt_np.shape[0], pred_np.shape[0])
+                        pair = np.concatenate([gt_np[:Tm], pred_np[:Tm]], axis=3)  # side-by-side on W
+                        info[f"action_viz/{mode}_video_gt_vs_pred_s{s}"] = wandb.Video(pair, fps=self.fps, format="mp4")
             if distributed.is_rank0() and wandb.run is not None and info:
                 info["trainer/global_step"] = iteration
                 wandb.log(info, step=iteration)
