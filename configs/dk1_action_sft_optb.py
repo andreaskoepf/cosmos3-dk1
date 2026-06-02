@@ -81,7 +81,7 @@ _DK1_DATAMIX = [
 _DK1_BLEND = L(DK1BlendedDataset)(
     roots_weights=[[root, w] for _name, root, w in _DK1_DATAMIX],
     normalization_path="${oc.env:DK1_ACTION_STATS}",
-    fps=30.0, chunk_length=16, mode="joint",
+    fps=30.0, chunk_length=32, mode="joint",
     mode_probs={"policy": 0.30, "causal_policy": 0.30, "forward_dynamics": 0.25, "inverse_dynamics": 0.15},
     num_clean_latent_frames=2,
     rtc_action_prefix=8, rtc_prob=0.25, rtc_decay=0.3,
@@ -98,7 +98,7 @@ _DK1_BLEND = L(DK1BlendedDataset)(
 # Shared kwargs for the in-training viz eval datasets (built mode-pinned, split="eval").
 _VIZ_DS_KWARGS = dict(
     normalization_path="${oc.env:DK1_ACTION_STATS}",
-    fps=30.0, chunk_length=16, num_clean_latent_frames=2,
+    fps=30.0, chunk_length=32, num_clean_latent_frames=2,
     relative_actions=True, video_hw=(544, 736), caption_metadata=True,
     tokenizer_config="${model.config.vlm_config.tokenizer}",
     eval_last_n_episodes=_EVAL_LAST_N, video_fit_mode=_VIDEO_FIT_MODE,

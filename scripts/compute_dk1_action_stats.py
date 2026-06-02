@@ -25,23 +25,41 @@ JOINT_DIMS = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
 GRIPPER_DIMS = [6, 13]
 
 
-def load_actions(root: str, relative: bool) -> np.ndarray:
-    """Pooled per-frame action targets. When `relative`, joint dims are made
-    relative to the SAME frame's observation.state[:14] (a per-frame proxy for
-    the chunk-start reference — fine for computing q01/q99 ranges); grippers stay
-    absolute."""
+def load_actions(root: str, relative: bool, chunk_length: int, stride: int) -> np.ndarray:
+    """Pooled action targets matching the dataset normalization.
+
+    When `relative`, joints are made CHUNK-START-relative: for each length-`chunk_length`
+    window (within one episode, every `stride` frames) the joint dims of all steps are
+    offset by the window's first-frame observation.state[:14] — exactly what
+    DK1LeRobotDataset does. This makes q01/q99 reflect the true horizon distribution
+    (the cumulative drift grows with chunk_length), so longer chunks don't clip.
+    Grippers stay absolute (forced to [0,1] in main)."""
     files = sorted(glob.glob(str(Path(root) / "data" / "chunk-*" / "file-*.parquet")))
-    chunks = []
+    if not files:
+        return np.empty((0, 14), np.float32)
+    cols = ["action", "observation.state", "episode_index", "index"] if relative else ["action", "index"]
+    A, S, EP, IDX = [], [], [], []
     for f in files:
-        cols = ["action", "observation.state"] if relative else ["action"]
         t = pq.read_table(f, columns=cols)
-        a = np.asarray(t.column("action").to_pylist(), dtype=np.float32)
+        A.append(np.asarray(t.column("action").to_pylist(), dtype=np.float32)[:, :14])
+        IDX.append(np.asarray(t.column("index").to_pylist(), dtype=np.int64))
         if relative:
-            st = np.asarray(t.column("observation.state").to_pylist(), dtype=np.float32)[:, :14]
-            a = a.copy()
-            a[:, JOINT_DIMS] -= st[:, JOINT_DIMS]
-        chunks.append(a)
-    return np.concatenate(chunks, axis=0) if chunks else np.empty((0, 14), np.float32)
+            S.append(np.asarray(t.column("observation.state").to_pylist(), dtype=np.float32)[:, :14])
+            EP.append(np.asarray(t.column("episode_index").to_pylist(), dtype=np.int64))
+    A = np.concatenate(A); idx = np.concatenate(IDX)
+    order = np.argsort(idx, kind="stable"); A = A[order]
+    if not relative:
+        return A
+    S = np.concatenate(S)[order]; EP = np.concatenate(EP)[order]
+    n = len(A)
+    out = []
+    for s in range(0, n - chunk_length + 1, max(1, stride)):
+        if EP[s + chunk_length - 1] != EP[s]:  # window must stay within one episode
+            continue
+        rel = A[s : s + chunk_length].copy()
+        rel[:, JOINT_DIMS] -= S[s, JOINT_DIMS]
+        out.append(rel)
+    return np.concatenate(out, axis=0) if out else np.empty((0, 14), np.float32)
 
 
 def main() -> None:
@@ -49,13 +67,19 @@ def main() -> None:
     ap.add_argument("roots", nargs="+", help="dk1 LeRobot dataset roots")
     ap.add_argument("--out", required=True)
     ap.add_argument("--relative", action="store_true",
-                    help="joints relative to observation.state[:14]; must match the dataset setting")
+                    help="joints CHUNK-START-relative; must match the dataset setting")
+    ap.add_argument("--chunk-length", type=int, default=32,
+                    help="action chunk length the stats are computed for (must match the dataset)")
+    ap.add_argument("--stride", type=int, default=0,
+                    help="window stride (0 → non-overlapping = chunk_length)")
     args = ap.parse_args()
+    stride = args.stride if args.stride > 0 else args.chunk_length
+    print(f"relative={args.relative} chunk_length={args.chunk_length} stride={stride}")
 
     all_actions = []
     for r in args.roots:
-        a = load_actions(r, args.relative)
-        print(f"  {Path(r).name}: {a.shape[0]:>9d} frames, dim={a.shape[1] if a.size else '?'}")
+        a = load_actions(r, args.relative, args.chunk_length, stride)
+        print(f"  {Path(r).name}: {a.shape[0]:>9d} window-steps, dim={a.shape[1] if a.size else '?'}")
         if a.size:
             all_actions.append(a)
     actions = np.concatenate(all_actions, axis=0)

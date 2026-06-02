@@ -22,7 +22,7 @@ export LORA_ALSO_TRAIN=action2llm,llm2action,action_modality_embed,q_proj_moe_ge
 
 export BASE_CHECKPOINT_PATH=$DK1/checkpoints/Cosmos3-Nano-dcp
 export DK1_DATA_ROOT=${DK1_DATA_ROOT:-/workspace/data/dk1_black_and_white_swan_2026-05-13}
-export DK1_ACTION_STATS=$DK1/data/dk1_action_normalization.json
+export DK1_ACTION_STATS=${DK1_ACTION_STATS:-$DK1/data/dk1_action_normalization_relchunk32.json}
 export WAN_VAE_PATH=${WAN_VAE_PATH:-/workspace/code/fastwam/weights/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}
 
 export IMAGINAIRE_OUTPUT_ROOT=${IMAGINAIRE_OUTPUT_ROOT:-$DK1/outputs_optb}
