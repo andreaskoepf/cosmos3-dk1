@@ -165,6 +165,11 @@ class DK1LeRobotDataset(Dataset):
         #               (keeps full FOV + aspect, but injects redundant mirrored borders).
         # head_height_frac sets the head/wrist height split for "crop" and "stretch".
         video_fit_mode: str = "crop",
+        # Normalized-action clamp. Cosmos' normalize_action hard-clamps q01/q99→∓1 to
+        # [-1,1], saturating the ~2% tail. action_clip>1 leaves headroom (FastWAM used
+        # 5.0) so large/fast movements past q99 aren't flattened. De-normalization
+        # (inference/viz) is the same linear map with no clamp, so it stays consistent.
+        action_clip: float = 1.5,
     ) -> None:
         super().__init__()
         self._video_hw = (int(video_hw[0]), int(video_hw[1]))
@@ -199,6 +204,7 @@ class DK1LeRobotDataset(Dataset):
         if video_fit_mode not in ("crop", "pad", "stretch"):
             raise ValueError(f"video_fit_mode must be 'crop'|'pad'|'stretch', got {video_fit_mode!r}")
         self._video_fit_mode = str(video_fit_mode)
+        self._action_clip = float(action_clip)
         self._caption_idle_frames = bool(caption_idle_frames)
         self._cfg_dropout = float(cfg_dropout)
         self._caption_formatter = (
@@ -403,6 +409,14 @@ class DK1LeRobotDataset(Dataset):
             action[:, _JOINT_DIMS] -= obs_ref[_JOINT_DIMS]
         return torch.from_numpy(action).float()
 
+    def _normalize_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Quantile-normalize (q01/q99 → ∓1), clamped to ±action_clip. Like Cosmos'
+        normalize_action('quantile') but with a configurable clamp (it hard-clamps ±1)."""
+        st = self._load_norm_stats()
+        q01, q99 = st["q01"], st["q99"]
+        denom = (q99 - q01).clamp(min=1e-8)
+        return (2.0 * (action - q01) / denom - 1.0).clamp(-self._action_clip, self._action_clip)
+
     def _build_result(self, *, mode: str, video: torch.Tensor, action: torch.Tensor, ai_caption: str) -> dict[str, Any]:
         spec = dk1_action_spec()
         idle_frames = compute_idle_frames(
@@ -410,7 +424,7 @@ class DK1LeRobotDataset(Dataset):
             eps_t=5e-3 / self._fps, eps_r=np.deg2rad(1.5) / self._fps,
             eps_g=1e-2, joint_threshold=5e-3 / self._fps, min_streak=3,
         )
-        normalized_action = normalize_action(action, "quantile", self._load_norm_stats())
+        normalized_action = self._normalize_action(action)
         # Zero-pad the 14-D action up to the model's action width (max_action_dim).
         raw_dim = normalized_action.shape[-1]
         if self._max_action_dim > raw_dim:
