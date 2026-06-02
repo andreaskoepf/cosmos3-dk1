@@ -128,7 +128,7 @@ dk1_action_sft_nano = LazyDict(
         ),
         dataloader_train=L(PackingDataLoader)(
             audio_sample_rate=48000, dataset_name="default",
-            max_samples_per_batch=None, max_sequence_length=45056, patch_spatial=2,
+            max_samples_per_batch=None, max_sequence_length=65536, patch_spatial=2,
             sound_latent_fps=0,
             tokenizer_spatial_compression_factor=16, tokenizer_temporal_compression_factor=4,
             dataloader=L(RankPartitionedDataLoader)(

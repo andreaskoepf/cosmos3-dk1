@@ -4,7 +4,7 @@
 # Consumed by cosmos_framework.configs.toml_config.sft_config.load_experiment_from_toml,
 # layered on top of the registered `dk1_action_sft_nano` experiment (configs/dk1_action_sft_nano.py).
 #
-# This is sized as a 2-GPU DRY RUN (max_iter=10). Scale max_iter/lr/datamix up after it's green.
+# Real run: 25k iters, 480p, full 21-source blend, bs=8/grad_accum=2, token budget 65536 (~63GB/80GB).
 # Env vars expected (set by scripts/launch_dk1_sft.sh):
 #   BASE_CHECKPOINT_PATH  → cosmos-dk1/checkpoints/Cosmos3-Nano-dcp
 #   DK1_DATA_ROOT         → a dk1 LeRobot dataset root (single root for the dry run)
@@ -21,7 +21,7 @@ name         = "dk1_action_sft_nano"
 wandb_mode   = "online"
 
 [model]
-max_num_tokens_after_packing = 45056
+max_num_tokens_after_packing = 65536
 joint_attn_implementation    = "two_way"
 precision                    = "bfloat16"
 # LoRA-only (base weights frozen) — fits 2x H100. Targets the generator MoE attention.
@@ -66,18 +66,18 @@ lr             = 5.0e-4
 weight_decay   = 0
 
 [scheduler]
-cycle_lengths      = [1000]
+cycle_lengths      = [25000]   # cosine spans the full 25k run
 f_max              = [1.0]
 f_min              = [0.0]
 f_start            = [0.0]
 verbosity_interval = 0
-warm_up_steps      = [5]
+warm_up_steps      = [2000]
 
 [trainer]
 distributed_parallelism = "fsdp"
 grad_accum_iter         = 2
 logging_iter            = 1
-max_iter                = 20             # DRY RUN — bump to real budget once green
+max_iter                = 25000          # real run budget (~3.5 epochs, ~7 days @24s)
 
 [trainer.callbacks.grad_clip]
 # 1.0 (not the vision-SFT recipe's 0.1): our action2llm/llm2action are trained
@@ -89,9 +89,9 @@ force_finite = true
 [checkpoint]
 keys_to_skip_loading = ["net_ema.", "lora_"]   # LoRA tensors fresh-init
 load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter            = 10
+save_iter            = 5000
 # load_training_state=false / strict_resume=false are set in the experiment config
 # (not TOML-schema keys).
 
 [dataloader_train]
-max_sequence_length = 45056
+max_sequence_length = 65536
