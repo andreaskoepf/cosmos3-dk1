@@ -151,6 +151,18 @@ class DK1LeRobotDataset(Dataset):
         # safe to resume with an extended datamix (no random train↔eval leakage).
         eval_last_n_episodes: int = 0,
         split: str = "train",
+        # Fraction of the bucket HEIGHT given to the head cam (top); the wrist cams
+        # share the remaining height (bottom, split L|R). Cameras are resize-cropped
+        # (cover + center-crop, FastWAM-style) to exactly fill the bucket — NO mirror
+        # padding (which would inject redundant pixels).
+        head_height_frac: float = 2.0 / 3.0,
+        # How cameras are fit to the bucket (configurable for ablation):
+        #   "crop" — resize-to-cover + center-crop each cam to fill the bucket exactly
+        #            (FastWAM-style; real pixels, no borders, but crops some FOV).
+        #   "pad"  — tile head + half-size wrists, downscale-to-fit, center reflection-pad
+        #            (keeps full FOV but injects redundant mirrored borders).
+        # head_height_frac applies to "crop" only.
+        video_fit_mode: str = "crop",
     ) -> None:
         super().__init__()
         self._video_hw = (int(video_hw[0]), int(video_hw[1]))
@@ -181,6 +193,10 @@ class DK1LeRobotDataset(Dataset):
         self._rtc_action_prefix = int(rtc_action_prefix)
         self._rtc_prob = float(rtc_prob)
         self._rtc_decay = float(rtc_decay)
+        self._head_height_frac = float(head_height_frac)
+        if video_fit_mode not in ("crop", "pad"):
+            raise ValueError(f"video_fit_mode must be 'crop' or 'pad', got {video_fit_mode!r}")
+        self._video_fit_mode = str(video_fit_mode)
         self._caption_idle_frames = bool(caption_idle_frames)
         self._cfg_dropout = float(cfg_dropout)
         self._caption_formatter = (
@@ -288,18 +304,45 @@ class DK1LeRobotDataset(Dataset):
                 return self._decode_vrs(path, abs_ts)
             return decode_video_frames(path, abs_ts, self._tolerance_s)
 
-        top = decode(_TOP_VIEW)
-        left = decode(_BOTTOM_LEFT)
-        right = decode(_BOTTOM_RIGHT)
-        # Layout: head full-width on top; left|right wrist concatenated on bottom,
-        # each resized to half-height/half-width so the bottom row matches top width.
-        _, _, h, w = top.shape
-        half_h, half_w = h // 2, w // 2
-        left = F.interpolate(left, size=(half_h, half_w), mode="bilinear", align_corners=False)
-        right = F.interpolate(right, size=(half_h, half_w), mode="bilinear", align_corners=False)
-        bottom = torch.cat([left, right], dim=-1)
-        tiled = torch.cat([top, bottom], dim=-2)  # [T,3,H+H/2,W]
-        return self._fit_to_bucket(tiled)
+        if self._video_fit_mode == "pad":
+            # Legacy: head full-size on top, half-size wrists on bottom, then
+            # downscale-to-fit + center reflection-pad to the bucket (redundant borders).
+            top = decode(_TOP_VIEW)
+            left = decode(_BOTTOM_LEFT)
+            right = decode(_BOTTOM_RIGHT)
+            _, _, h, w = top.shape
+            half_h, half_w = h // 2, w // 2
+            left = F.interpolate(left, size=(half_h, half_w), mode="bilinear", align_corners=False)
+            right = F.interpolate(right, size=(half_h, half_w), mode="bilinear", align_corners=False)
+            tiled = torch.cat([top, torch.cat([left, right], dim=-1)], dim=-2)
+            return self._fit_to_bucket(tiled)
+
+        # "crop" (default): resize-crop (cover + center-crop) each camera so the composite
+        # EXACTLY fills the (H, W) bucket — no mirror/replicate padding. Head gets the top
+        # `head_height_frac` of the height (full width); the two wrists split the bottom.
+        H, W = self._video_hw
+        head_h = max(1, round(H * self._head_height_frac))
+        wrist_h = H - head_h
+        left_w = W // 2
+        right_w = W - left_w
+        top = self._resize_crop(decode(_TOP_VIEW), head_h, W)
+        left = self._resize_crop(decode(_BOTTOM_LEFT), wrist_h, left_w)
+        right = self._resize_crop(decode(_BOTTOM_RIGHT), wrist_h, right_w)
+        bottom = torch.cat([left, right], dim=-1)  # [T,3,wrist_h,W]
+        return torch.cat([top, bottom], dim=-2)    # [T,3,H,W] — exact, no padding
+
+    @staticmethod
+    def _resize_crop(img: torch.Tensor, h: int, w: int) -> torch.Tensor:
+        """[T,3,oh,ow] → [T,3,h,w]: scale (preserving aspect) so both sides ≥ target,
+        then center-crop the excess. FastWAM-style — fills the tile with real pixels,
+        no stretching, no padding."""
+        _, _, oh, ow = img.shape
+        scale = max(h / oh, w / ow)
+        nh, nw = max(h, round(oh * scale)), max(w, round(ow * scale))
+        if (nh, nw) != (oh, ow):
+            img = F.interpolate(img, size=(nh, nw), mode="bilinear", align_corners=False)
+        top, left = (nh - h) // 2, (nw - w) // 2
+        return img[..., top : top + h, left : left + w]
 
     def _decode_vrs(self, path: str, abs_ts: list[float]) -> torch.Tensor:
         """Decode frames by index via video_reader-rs (fast Rust decoder).
@@ -313,20 +356,19 @@ class DK1LeRobotDataset(Dataset):
         return torch.from_numpy(frames).permute(0, 3, 1, 2).float() / 255.0  # [T,3,H,W] in [0,1]
 
     def _fit_to_bucket(self, video: torch.Tensor) -> torch.Tensor:
-        """Snap a [T,3,H,W] clip to the target bucket WITHOUT distorting aspect:
+        """(pad mode) Snap a [T,3,H,W] clip to the bucket WITHOUT distorting aspect:
         downscale (preserving aspect) only if it exceeds the bucket, then center
-        reflection-pad to the exact bucket size (matches Cosmos's action pipeline)."""
+        reflection-pad to the exact bucket size."""
         ht, wt = self._video_hw
         _, _, h, w = video.shape
         scale = min(ht / h, wt / w)
-        if scale < 1.0:  # composite larger than bucket → fit inside, keep aspect
+        if scale < 1.0:
             nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
             video = F.interpolate(video, size=(nh, nw), mode="bilinear", align_corners=False)
             _, _, h, w = video.shape
         pad_h, pad_w = ht - h, wt - w
         if pad_h or pad_w:
             pt, pl = pad_h // 2, pad_w // 2
-            # reflect needs pad < dim; fall back to replicate otherwise.
             mode = "reflect" if (pt < h and (pad_h - pt) < h and pl < w and (pad_w - pl) < w) else "replicate"
             video = F.pad(video, (pl, pad_w - pl, pt, pad_h - pt), mode=mode)
         return video

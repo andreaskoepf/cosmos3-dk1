@@ -33,6 +33,9 @@ from action_viz_callback import EveryNActionViz
 
 # Per-dataset eval split: reserve the last N episodes of EACH source for eval.
 _EVAL_LAST_N = 2
+# Camera fit mode (ablation knob): "crop" (resize-cover+center-crop, no borders) vs
+# "pad" (mirror-padded). VIDEO_FIT_MODE env selects it for both training + viz eval.
+_VIDEO_FIT_MODE = os.environ.get("VIDEO_FIT_MODE", "crop")
 
 cs = ConfigStore.instance()
 
@@ -89,6 +92,7 @@ _DK1_BLEND = L(DK1BlendedDataset)(
     tokenizer_config="${model.config.vlm_config.tokenizer}",
     video_hw=(544, 736),
     eval_last_n_episodes=_EVAL_LAST_N,  # split="train" (default) → excludes the held-out episodes
+    video_fit_mode=_VIDEO_FIT_MODE,
 )
 
 # Shared kwargs for the in-training viz eval datasets (built mode-pinned, split="eval").
@@ -97,7 +101,7 @@ _VIZ_DS_KWARGS = dict(
     fps=30.0, chunk_length=16, num_clean_latent_frames=2,
     relative_actions=True, video_hw=(544, 736), caption_metadata=True,
     tokenizer_config="${model.config.vlm_config.tokenizer}",
-    eval_last_n_episodes=_EVAL_LAST_N,
+    eval_last_n_episodes=_EVAL_LAST_N, video_fit_mode=_VIDEO_FIT_MODE,
 )
 
 dk1_action_sft_optb = LazyDict(
