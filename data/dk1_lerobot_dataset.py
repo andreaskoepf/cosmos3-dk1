@@ -144,6 +144,13 @@ class DK1LeRobotDataset(Dataset):
         caption_metadata: bool = False,
         caption_idle_frames: bool = False,
         cfg_dropout: float = 0.0,
+        # Deterministic per-dataset eval split: the LAST `eval_last_n_episodes`
+        # episodes (by episode_index) are reserved for eval. split="train" excludes
+        # them, split="eval" uses only them, split="all" (or n==0) disables the split.
+        # Per-dataset + by episode order → stable when datasets are added/removed and
+        # safe to resume with an extended datamix (no random train↔eval leakage).
+        eval_last_n_episodes: int = 0,
+        split: str = "train",
     ) -> None:
         super().__init__()
         self._video_hw = (int(video_hw[0]), int(video_hw[1]))
@@ -209,6 +216,23 @@ class DK1LeRobotDataset(Dataset):
             ),
             key=lambda row: int(row["index"]),
         )
+        # Valid window starts: deterministic per-dataset last-N-episode split, AND
+        # every chunk window stays within a single episode (no cross-episode mixing).
+        ep_order = sorted(self._episodes.keys())
+        n_eval = max(0, int(eval_last_n_episodes))
+        if n_eval > 0 and str(split) != "all" and n_eval < len(ep_order):
+            held = set(ep_order[-n_eval:])
+            allowed = held if str(split) == "eval" else (set(ep_order) - held)
+        else:
+            allowed = set(ep_order)
+        cl = self._chunk_length
+        ep_of = [int(r["episode_index"]) for r in self._rows]
+        self._valid_starts = [
+            i
+            for i in range(len(self._rows) - cl)
+            if ep_of[i] in allowed and ep_of[i + cl] == ep_of[i]
+        ]
+        self._split = str(split)
 
     @property
     def fps(self) -> float:
@@ -239,7 +263,7 @@ class DK1LeRobotDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         mode = self._choose_mode()
-        idx = int(idx)
+        idx = self._valid_starts[int(idx)]
         first_row = self._rows[idx]
         episode = self._episodes[int(first_row["episode_index"])]
 
@@ -455,7 +479,7 @@ class DK1LeRobotDataset(Dataset):
         return self._norm_stats
 
     def __len__(self) -> int:
-        return max(0, len(self._rows) - self._chunk_length)
+        return len(self._valid_starts)
 
 
 class DK1BlendedDataset(Dataset):

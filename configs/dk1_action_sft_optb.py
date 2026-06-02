@@ -29,6 +29,10 @@ from cosmos_framework.data.vfm.joint_dataloader import PackingDataLoader, RankPa
 
 from dk1_lerobot_dataset import DK1LeRobotDataset, DK1BlendedDataset  # noqa: F401
 from per_mode_loss import PerModeLossCallback
+from action_viz_callback import EveryNActionViz
+
+# Per-dataset eval split: reserve the last N episodes of EACH source for eval.
+_EVAL_LAST_N = 2
 
 cs = ConfigStore.instance()
 
@@ -84,6 +88,16 @@ _DK1_BLEND = L(DK1BlendedDataset)(
     relative_actions=True,
     tokenizer_config="${model.config.vlm_config.tokenizer}",
     video_hw=(544, 736),
+    eval_last_n_episodes=_EVAL_LAST_N,  # split="train" (default) → excludes the held-out episodes
+)
+
+# Shared kwargs for the in-training viz eval datasets (built mode-pinned, split="eval").
+_VIZ_DS_KWARGS = dict(
+    normalization_path="${oc.env:DK1_ACTION_STATS}",
+    fps=30.0, chunk_length=16, num_clean_latent_frames=2,
+    relative_actions=True, video_hw=(544, 736), caption_metadata=True,
+    tokenizer_config="${model.config.vlm_config.tokenizer}",
+    eval_last_n_episodes=_EVAL_LAST_N,
 )
 
 dk1_action_sft_optb = LazyDict(
@@ -124,8 +138,21 @@ dk1_action_sft_optb = LazyDict(
             # Per-mode loss logging (merges into the basic/optimization/job_monitor
             # callback set). Buckets per-sample loss by data_batch["mode"] → W&B
             # train_per_mode/* and train_per_mode_frac/*.
-            callbacks=dict(per_mode_loss=L(PerModeLossCallback)(
-                log_freq=int(os.environ.get("PER_MODE_LOG_FREQ", "100")))),
+            callbacks=dict(
+                per_mode_loss=L(PerModeLossCallback)(
+                    log_freq=int(os.environ.get("PER_MODE_LOG_FREQ", "100"))),
+                # In-training visual eval (action joint plots + video prediction) on the
+                # held-out eval split, every N steps + at step 0. ACTION_VIZ_EVERY_N env knob.
+                action_viz=L(EveryNActionViz)(
+                    every_n=int(os.environ.get("ACTION_VIZ_EVERY_N", "250")),
+                    run_at_start=True,
+                    eval_root="/workspace/data/dk1_black_and_white_swan_2026-05-13",
+                    dataset_kwargs=_VIZ_DS_KWARGS,
+                    n_samples=2, guidance=1.5, num_steps=20, fps=30,
+                    action_modes=["policy", "causal_policy"],
+                    video_modes=["policy", "forward_dynamics"],
+                ),
+            ),
         ),
         checkpoint=dict(
             keys_to_skip_loading=["net_ema."],
