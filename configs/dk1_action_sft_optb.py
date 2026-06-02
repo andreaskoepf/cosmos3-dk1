@@ -18,6 +18,7 @@ Memory (2xH100, FSDP shard=2): attn full-FT adds ~12GB/GPU opt state over the Lo
 baseline; MLP-LoRA opt is ~0.5GB. Probe the token budget to confirm headroom.
 """
 import copy
+import os
 
 from hydra.core.config_store import ConfigStore
 
@@ -27,6 +28,7 @@ from cosmos_framework.configs.base.experiment.sft.models.nano_model_config impor
 from cosmos_framework.data.vfm.joint_dataloader import PackingDataLoader, RankPartitionedDataLoader
 
 from dk1_lerobot_dataset import DK1LeRobotDataset, DK1BlendedDataset  # noqa: F401
+from per_mode_loss import PerModeLossCallback
 
 cs = ConfigStore.instance()
 
@@ -116,6 +118,11 @@ dk1_action_sft_optb = LazyDict(
             seed=42, timeout_period=999999999,
             cudnn=dict(benchmark=True, deterministic=False),
             grad_scaler_args=dict(enabled=False),
+            # Per-mode loss logging (merges into the basic/optimization/job_monitor
+            # callback set). Buckets per-sample loss by data_batch["mode"] → W&B
+            # train_per_mode/* and train_per_mode_frac/*.
+            callbacks=dict(per_mode_loss=L(PerModeLossCallback)(
+                log_freq=int(os.environ.get("PER_MODE_LOG_FREQ", "100")))),
         ),
         checkpoint=dict(
             keys_to_skip_loading=["net_ema."],

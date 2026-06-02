@@ -36,10 +36,29 @@ index 917fe4c..a615e72 100644
  
  
 diff --git a/cosmos_framework/model/vfm/omni_mot_model.py b/cosmos_framework/model/vfm/omni_mot_model.py
-index 9e93f98..4470ea2 100644
+index 9e93f98..b39b9c5 100644
 --- a/cosmos_framework/model/vfm/omni_mot_model.py
 +++ b/cosmos_framework/model/vfm/omni_mot_model.py
-@@ -4266,12 +4266,27 @@ class OmniMoTModel(ImaginaireModel):
+@@ -983,7 +983,7 @@ class OmniMoTModel(ImaginaireModel):
+                     "Action condition mask must be a list of tensors for loss computation"
+                 )
+                 assert gen_data_noised.vt_target_action is not None, "Action targets required when action_gen is True"
+-                fm_loss_action, _ = self._compute_flow_matching_loss(
++                fm_loss_action, fm_loss_action_per_instance = self._compute_flow_matching_loss(
+                     pred=out_net["preds_action"],
+                     target=gen_data_noised.vt_target_action,
+                     condition_mask=data_batch_packed.action.condition_mask,
+@@ -997,6 +997,9 @@ class OmniMoTModel(ImaginaireModel):
+                 # Yihuai: In case the video loss is too large (1.5) and covers the action loss (0.05), we scale up the action loss to match the video loss to improve action precision.
+                 total_loss += fm_loss_action * rf_cfg.action_loss_weight
+                 losses_dict["flow_matching_loss_action"] = fm_loss_action
++                # Per-sample action loss (was discarded) — enables per-mode loss bucketing
++                # in PerModeLossCallback (aligned with data_batch["mode"]).
++                losses_dict["flow_matching_loss_action_per_instance"] = fm_loss_action_per_instance
+             else:
+                 # No action data in this batch. Connect the network's dummy preds_action
+                 # to the loss so action-specific params
+@@ -4266,12 +4269,27 @@ class OmniMoTModel(ImaginaireModel):
          from cosmos_framework.utils.vfm.lora import inject_lora_pre_fsdp
  
          self.lora_alpha = lora_alpha
