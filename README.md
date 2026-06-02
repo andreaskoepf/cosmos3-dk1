@@ -14,15 +14,21 @@ DK-1 embodiment (14-D bimanual joint-space). See [`PLAN.md`](PLAN.md) for the fu
 - `configs/dk1_action_sft_optb.py` / `.toml` — **current** experiment. Attention (`q/k/v/o_moe_gen`, ~1.51B)
   full-FT via `$LORA_ALSO_TRAIN`; gen MLP (`mlp_moe_gen.{gate,up,down}_proj`, ~5.44B) LoRA r16 with
   **path-qualified** targets (gen only, not the frozen reasoner's `mlp.*`); action I/O full-FT. 480p, 21-source
-  blend, bs=8/grad_accum=2, token budget 65536 (~71GB/80GB, ~29s/iter on 2×H100), 25k iters.
+  blend, **action chunk_length=32**, bs=8/grad_accum=2, token budget 65536 (~71GB/80GB, ~29s/iter on 2×H100),
+  25k iters, warmup 1000.
 - `configs/dk1_action_sft_nano.py` / `.toml` — LoRA-only baseline experiment.
-- `configs/per_mode_loss.py` — `PerModeLossCallback`: buckets per-sample loss by training mode → W&B
-  `train_per_mode/<mode>_<modality>` + `train_per_mode_frac/<mode>` (see **W&B metrics** below).
-- `data/dk1_lerobot_dataset.py` — `DK1LeRobotDataset` (3-cam concat-view, relative joint actions,
-  5-frame conditioning, multi-mode masking + RTC, video_reader-rs decode, reflection-pad to bucket) and
-  `DK1BlendedDataset` (weighted blend of the 21 sources as one dataset).
-- `data/dk1_action_normalization.json` — q01/q99 action stats over all 21 sources (relative joints,
-  grippers mapped (0,1)→(-1,1)). Regenerate with `scripts/compute_dk1_action_stats.py`.
+- `configs/per_mode_loss.py` — `PerModeLossCallback`: per-sample loss bucketed by training mode → W&B
+  `train_per_mode/<mode>_<modality>` + `train_per_mode_frac/<mode>` (see **W&B metrics**).
+- `configs/action_viz_callback.py` — `EveryNActionViz`: in-training eval that generates on the held-out split
+  and logs action-chunk joint plots + GT-vs-pred video to W&B (see **In-training eval**).
+- `data/dk1_lerobot_dataset.py` — `DK1LeRobotDataset` (3-cam concat-view, relative joint actions + configurable
+  `action_clip`, multi-mode masking + RTC, JSON caption metadata + CFG dropout, per-dataset eval split,
+  configurable camera fit mode, video_reader-rs decode) and `DK1BlendedDataset` (weighted blend of 21 sources
+  as one dataset).
+- `data/dk1_action_normalization_relchunk32.json` — **chunk-aware** q01/q99 action stats (chunk-start-relative
+  over 32-step windows) over all 21 sources; grippers mapped (0,1)→(-1,1). The launcher's `$DK1_ACTION_STATS`
+  points here. Regenerate with `scripts/compute_dk1_action_stats.py --relative --chunk-length 32`.
+  (`data/dk1_action_normalization.json` is the older per-frame/chunk-16 stats, kept for reference.)
 - `scripts/launch_dk1_sft_optb.sh` — launcher for the current recipe. `scripts/launch_dk1_sft.sh` — baseline.
 - `docs/` — lerobot/Cosmos compatibility notes, dry-run checklist.
 - `framework_patches.diff` — **required** patches to a `cosmos-framework` checkout (see Setup).
@@ -39,8 +45,26 @@ DK-1 embodiment (14-D bimanual joint-space). See [`PLAN.md`](PLAN.md) for the fu
    - `utils/vfm/lora.py` — path-qualified LoRA target matching (e.g. `mlp_moe_gen.gate_proj`), so MLP LoRA
      hits only the generation expert and not the reasoner's same-leaf `mlp.gate_proj`.
 3. Download `nvidia/Cosmos3-Nano` and convert to DCP (`convert_model_to_dcp`).
-4. Point env vars in the launcher at your paths, then `bash scripts/launch_dk1_sft_optb.sh`
-   (`WANDB_MODE=offline` for a dry run; `PER_MODE_LOG_FREQ=<n>` to change per-mode log cadence).
+4. Point env vars in the launcher at your paths, then `bash scripts/launch_dk1_sft_optb.sh`. Env knobs:
+   - `WANDB_MODE=offline` — dry run, no W&B upload.
+   - `VIDEO_FIT_MODE=crop|pad|stretch` — camera→bucket fit (default `crop`); drives training + viz (for ablation).
+   - `PER_MODE_LOG_FREQ=<n>` — per-mode loss cadence (default 100). `ACTION_VIZ_EVERY_N=<n>` — viz cadence (default 250).
+   - `DK1_ACTION_STATS=<path>` — action-stats JSON (default the chunk-32 stats).
+
+## Data preprocessing (configurable)
+- **Camera fit** (`video_fit_mode`): head cam fills the top `head_height_frac` (⅔) of the 544×736 bucket,
+  the two wrist cams the bottom. `crop` = resize-cover + center-crop (real pixels, no borders, crops some FOV);
+  `stretch` = resize-to-tile (full FOV, distorts aspect); `pad` = legacy mirror-padded. Ablate via `VIDEO_FIT_MODE`.
+- **Action chunk** = 32 steps, joints **chunk-start-relative** (each step minus the chunk-start pose), grippers
+  absolute→(−1,1). Quantile-normalized then clamped to **±`action_clip`** (default 1.5 — headroom past the q01/q99
+  tail; Cosmos hard-clamps ±1, FastWAM used 5). Stats must be **chunk-aware** for the chunk length (see above) or
+  the longer-horizon tail clips.
+- **Caption** (`caption_metadata=True`): the task string is enriched into the framework's `ActionPromptJsonFormatter`
+  JSON (viewpoint/duration/fps/resolution) — matches DROID training + inference. `cfg_dropout=0.1` empties the
+  caption on 10% of samples (enables classifier-free guidance). No system prompt (Cosmos convention).
+- **Eval split** (`eval_last_n_episodes=2`): the LAST N episodes of EACH source are held out (deterministic,
+  per-dataset → stable under datamix changes, no train↔eval leakage on resume). Training uses `split=train`; the
+  viz callback uses `split=eval`.
 
 ## Multi-mode training
 `mode="joint"` rolls one mode **per sample**, weighted by `mode_probs` (current: policy 0.30 /
@@ -68,7 +92,19 @@ Logged every `PER_MODE_LOG_FREQ` steps (default 100) as a 100-step windowed mean
   Raw, **unweighted** per-instance losses (the `action_loss_weight=10` applies only to the total).
 - `train_per_mode_frac/<mode>` — realized mode share (sanity-checks `mode_probs`).
 
+## In-training eval (`EveryNActionViz`)
+Every `ACTION_VIZ_EVERY_N` steps (and at iter 1 via `run_at_start`), generates with
+`model.generate_samples_from_batch` on a FIXED held-out (`split=eval`) set per mode and logs to W&B:
+- `action_viz/<mode>_chunk` — matplotlib joint plots, predicted (dashed) vs GT (solid), for policy & causal_policy.
+- `action_viz/<mode>_video_gt_vs_pred` — decoded GT|pred video for policy & forward_dynamics.
+- `action_viz/<mode>_mse` — scalar.
+
+FSDP-safe (all ranks generate, rank-0 logs) and failure-isolated (a generation error is logged but never kills
+training). There is no separate train/val split otherwise — these eval samples come from the per-dataset held-out
+episodes, so it's a qualitative monitor, not a generalization benchmark.
+
 ## Key choices
+- **chunk_length=32** (divisible by 4 → 33 video frames = 4·8+1 for clean VAE temporal); longer horizon, fewer replans.
 - **Joint-space, relative** action targets (not cartesian) — cartesian/orientation noise causes IK failures
   on resting arms (real-robot finding); joint-space sidesteps IK entirely.
 - **Attention full-FT + gen-MLP LoRA + full action I/O** (`action2llm`/`llm2action`/`action_modality_embed`)
