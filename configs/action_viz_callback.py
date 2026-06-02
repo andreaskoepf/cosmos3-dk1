@@ -32,7 +32,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from cosmos_framework.callbacks.every_n import EveryN
-from cosmos_framework.data.vfm.action.action_normalization import load_action_stats
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import distributed, log
 
@@ -73,15 +72,12 @@ class EveryNActionViz(EveryN):
         self.num_steps = int(num_steps)
         self.fps = int(fps)
         self._cache: dict[str, list[dict]] = {}     # mode -> list of raw sample dicts
-        self._stats: dict[str, torch.Tensor] | None = None
         self._raw_dim = 14
 
     # ---- fixed eval-sample construction (once) ----
     def _ensure_samples(self) -> None:
         if self._cache:
             return
-        norm_path = self.dataset_kwargs.get("normalization_path")
-        self._stats = {k: torch.as_tensor(v) for k, v in load_action_stats(norm_path).items()}
         modes = sorted(set(self.action_modes) | set(self.video_modes))
         for mode in modes:
             kw = dict(self.dataset_kwargs)
@@ -138,12 +134,11 @@ class EveryNActionViz(EveryN):
             "text_token_ids": [s["text_token_ids"] for s in samples] if "text_token_ids" in samples[0] else None,
         }
 
-    def _denorm(self, a: torch.Tensor) -> np.ndarray:
-        # a: [T, raw_dim] normalized → inverse quantile → real units (relative joints / [0,1] grippers)
-        q01 = self._stats["q01"][: self._raw_dim].to(a)
-        q99 = self._stats["q99"][: self._raw_dim].to(a)
-        out = (a[:, : self._raw_dim] + 1.0) / 2.0 * (q99 - q01) + q01
-        return out.float().cpu().numpy()
+    def _to_np(self, a: torch.Tensor) -> np.ndarray:
+        # NORMALIZED action [T, raw_dim] (model space, clamped ~[-action_clip,action_clip]).
+        # No de-norm → MSE and plots are on the uniform scale the model is trained on, so
+        # the metric reflects quality and isn't swamped by tiny absolute relative-joint deltas.
+        return a[:, : self._raw_dim].detach().float().cpu().numpy()
 
     def _action_figure(self, mode: str, gt: np.ndarray, pred: np.ndarray) -> "plt.Figure":
         T = gt.shape[0]
@@ -154,7 +149,8 @@ class EveryNActionViz(EveryN):
                 ax.plot(t, gt[:, d], "-", lw=1.5, alpha=0.7, label=f"d{d} gt" if len(dims) == 1 else None)
                 ax.plot(t, pred[:, d], "--", lw=1.5, label=f"d{d} pred" if len(dims) == 1 else None)
             ax.set_title(name); ax.set_xlabel("step"); ax.grid(alpha=0.3)
-        fig.suptitle(f"{mode}: action chunk (solid=GT, dashed=pred)")
+            ax.set_ylim(-1.6, 1.6)  # fixed normalized axis → close lines == low MSE (no autoscale)
+        fig.suptitle(f"{mode}: NORMALIZED action chunk (solid=GT, dashed=pred)")
         fig.tight_layout()
         return fig
 
@@ -185,8 +181,8 @@ class EveryNActionViz(EveryN):
                 # ----- action plot (action modes) -----
                 if mode in self.action_modes and out.get("action") is not None:
                     s = 0
-                    gt = self._denorm(samples[s]["action"])
-                    pred = self._denorm(out["action"][s].to(samples[s]["action"]))
+                    gt = self._to_np(samples[s]["action"])            # normalized GT
+                    pred = self._to_np(out["action"][s])              # normalized pred
                     Tm = min(gt.shape[0], pred.shape[0])
                     fig = self._action_figure(mode, gt[:Tm], pred[:Tm])
                     info[f"action_viz/{mode}_chunk"] = wandb.Image(fig)
