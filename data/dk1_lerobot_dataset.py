@@ -81,7 +81,15 @@ class DK1LeRobotDataset(Dataset):
         normalization_path: str,
         fps: float = 30.0,
         chunk_length: int = 16,
+        # Per-sample training mode. "joint" → roll one of forward_dynamics /
+        # inverse_dynamics / policy PER batch entry; a fixed mode name pins every
+        # sample. Each mode sets its OWN condition mask (see _build_result), so a
+        # packed batch mixes modes, each entry with its own clean/noisy pattern.
         mode: str = "joint",
+        # Weights for the "joint" per-sample mode roll: dict over the 3 modes (missing
+        # modes → weight 0). None → uniform. e.g. {"policy":0.6,"forward_dynamics":0.25,
+        # "inverse_dynamics":0.15}. Ignored when `mode` is a fixed mode name.
+        mode_probs: dict | None = None,
         tolerance_s: float = 1e-2,  # looser than DROID's 2e-4; dk1 ts precision
         # Observation conditioning: number of CLEAN latent vision frames at the
         # clip start. At 4x temporal compression, 2 latents ≈ 5 obs pixel frames
@@ -133,6 +141,16 @@ class DK1LeRobotDataset(Dataset):
         self._fps = float(fps)
         self._chunk_length = int(chunk_length)
         self._mode = mode
+        self._mode_names = list(_MODE_CHOICES)
+        if mode_probs is not None:
+            unknown = [m for m in mode_probs if m not in _MODE_CHOICES]
+            if unknown:
+                raise ValueError(f"mode_probs has unknown modes {unknown}; valid: {_MODE_CHOICES}")
+            self._mode_weights = [float(mode_probs.get(m, 0.0)) for m in self._mode_names]
+            if sum(self._mode_weights) <= 0:
+                raise ValueError(f"mode_probs must sum to >0, got {mode_probs}")
+        else:
+            self._mode_weights = None
         self._relative_actions = bool(relative_actions)
         self._vlm_tokenizer = None
         if tokenizer_config is not None:
@@ -189,7 +207,11 @@ class DK1LeRobotDataset(Dataset):
         return dk1_action_spec().names
 
     def _choose_mode(self) -> str:
-        return random.choice(_MODE_CHOICES) if self._mode == "joint" else self._mode
+        if self._mode != "joint":
+            return self._mode
+        if self._mode_weights is not None:
+            return random.choices(self._mode_names, weights=self._mode_weights, k=1)[0]
+        return random.choice(_MODE_CHOICES)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         mode = self._choose_mode()
@@ -302,25 +324,41 @@ class DK1LeRobotDataset(Dataset):
         t_pixel = video.shape[0]
         t_latent = 1 + (t_pixel - 1) // self._temporal_compression_factor
         num_clean = max(0, min(self._num_clean_latent_frames, t_latent - 1))
-        # Action RTC (FastWAM parity): with prob rtc_prob, give a clean action prefix
-        # of length K∈[1,k_max] sampled with P(K=k) ∝ exp(-rtc_decay·k) (short
-        # prefixes favored); otherwise K=0 (cold start). k_max clamped so ≥1 step
-        # stays supervised. rtc_action_prefix==0 disables RTC entirely.
-        k = 0
-        if self._rtc_action_prefix > 0 and random.random() < self._rtc_prob:
-            k_max = min(self._rtc_action_prefix, self._chunk_length - 1)
-            if self._rtc_decay > 0 and k_max > 1:
-                ks = range(1, k_max + 1)
-                weights = [math.exp(-self._rtc_decay * kk) for kk in ks]
-                k = random.choices(list(ks), weights=weights, k=1)[0]
-            else:
-                k = random.randint(1, k_max)
+        # Per-mode conditioning (clean = given as context; the rest are noised and
+        # supervised). The mode is chosen per sample (_choose_mode), so a packed
+        # batch mixes modes — each entry carries its own condition mask.
+        #   policy           : first `num_clean` video latents clean + RTC action
+        #                      prefix clean → predict remaining video + actions.
+        #   forward_dynamics : first `num_clean` video latents clean + ALL actions
+        #                      clean (trajectory given) → predict future video (world model).
+        #   inverse_dynamics : ALL video latents clean + NO actions clean → predict
+        #                      all actions from the fully-observed video.
+        if mode == "forward_dynamics":
+            vision_clean = list(range(num_clean))
+            action_clean = list(range(self._chunk_length))
+        elif mode == "inverse_dynamics":
+            vision_clean = list(range(t_latent))
+            action_clean = []
+        else:  # policy — RTC (FastWAM parity): with prob rtc_prob, give a clean action
+            # prefix of length K∈[1,k_max], P(K=k) ∝ exp(-rtc_decay·k) (short favored);
+            # else K=0 (cold start). rtc_action_prefix==0 disables RTC.
+            vision_clean = list(range(num_clean))
+            k = 0
+            if self._rtc_action_prefix > 0 and random.random() < self._rtc_prob:
+                k_max = min(self._rtc_action_prefix, self._chunk_length - 1)
+                if self._rtc_decay > 0 and k_max > 1:
+                    ks = range(1, k_max + 1)
+                    weights = [math.exp(-self._rtc_decay * kk) for kk in ks]
+                    k = random.choices(list(ks), weights=weights, k=1)[0]
+                else:
+                    k = random.randint(1, k_max)
+            action_clean = list(range(k))
         sequence_plan = SequencePlan(
             has_text=bool(ai_caption),
             has_vision=True,
-            condition_frame_indexes_vision=list(range(num_clean)),
+            condition_frame_indexes_vision=vision_clean,
             has_action=True,
-            condition_frame_indexes_action=list(range(k)),
+            condition_frame_indexes_action=action_clean,
         )
 
         result = {
