@@ -356,8 +356,7 @@
     <limit lower="-0.045" upper="0.001" effort="20" velocity="0.18"/>
   </joint>
 
-  <!-- TCP / fingertip grasp point (+0.158m along approach). Was named "right_tool0" in
-       the fastwam URDF; renamed here so tool0 can be the flange (ROS convention). -->
+  <!-- TCP / fingertip grasp point (+0.158m along approach). -->
   <link name="right_tcp"/>
   <joint name="right_tcp_joint" type="fixed">
     <origin xyz="0.158 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
@@ -366,10 +365,9 @@
   </joint>
   <!-- tool0 = FLANGE (ROS-Industrial convention): link6-7 origin (wrist, zero lever)
        with OpenCV orientation (z=approach/front, x=right). This is the effector frame
-       for cartesian actions — decouples position deltas from wrist-rotation lever.
-       NOTE: differs from the fastwam URDF, where tool0 is the fingertip (now tcp). -->
+       for cartesian actions — decouples position deltas from wrist-rotation lever. -->
   <link name="right_tool0"/>
-  <joint name="right_gripper_tool0" type="fixed">
+  <joint name="right_tool0_joint" type="fixed">
     <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
     <parent link="right_link6-7"/>
     <child link="right_tool0"/>
@@ -626,8 +624,7 @@
     <limit lower="-0.045" upper="0.001" effort="20" velocity="0.18"/>
   </joint>
 
-  <!-- TCP / fingertip grasp point (+0.158m along approach). Was named "left_tool0" in
-       the fastwam URDF; renamed here so tool0 can be the flange (ROS convention). -->
+  <!-- TCP / fingertip grasp point (+0.158m along approach). -->
   <link name="left_tcp"/>
   <joint name="left_tcp_joint" type="fixed">
     <origin xyz="0.158 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
@@ -636,10 +633,9 @@
   </joint>
   <!-- tool0 = FLANGE (ROS-Industrial convention): link6-7 origin (wrist, zero lever)
        with OpenCV orientation (z=approach/front, x=right). This is the effector frame
-       for cartesian actions — decouples position deltas from wrist-rotation lever.
-       NOTE: differs from the fastwam URDF, where tool0 is the fingertip (now grip_center). -->
+       for cartesian actions — decouples position deltas from wrist-rotation lever. -->
   <link name="left_tool0"/>
-  <joint name="left_gripper_tool0" type="fixed">
+  <joint name="left_tool0_joint" type="fixed">
     <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
     <parent link="left_link6-7"/>
     <child link="left_tool0"/>
