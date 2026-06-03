@@ -68,6 +68,9 @@ def compute_for_dataset(
 
     action_names = _load_dataset_action_names(dataset_path)
     verify_action_layout(action_names)
+    # tool0 is the FLANGE frame (wrist origin, OpenCV orientation z=front/x=right) — the
+    # DK1ArmFK default. We deliberately do NOT use tcp (the +0.158m fingertip), so the
+    # cartesian position deltas don't pick up the wrist-rotation lever. See the URDF.
     fk = DK1ArmFK(urdf_path=urdf_path, device=device, dtype=torch.float32)
     print(f"  URDF sha256: {fk.urdf_sha256[:16]}...  ({urdf_path})")
 
