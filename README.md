@@ -29,14 +29,22 @@ DK-1 embodiment (14-D bimanual joint-space). See [`PLAN.md`](PLAN.md) for the fu
   over 32-step windows) over all 21 sources; grippers mapped (0,1)→(-1,1). The launcher's `$DK1_ACTION_STATS`
   points here. Regenerate with `scripts/compute_dk1_action_stats.py --relative --chunk-length 32`.
   (`data/dk1_action_normalization.json` is the older per-frame/chunk-16 stats, kept for reference.)
+- `data/cartesian_fk.py` + `scripts/compute_cartesian.py` + `urdf/dk1_dual_arm.urdf` — FK pipeline that builds
+  per-arm EE-pose caches (`cache/cartesian/<dataset>/cartesian.parquet`) for the cartesian action space
+  (vendored from [open-thought/fastwam](https://github.com/open-thought/fastwam), Apache-2.0). Run once:
+  `python scripts/compute_cartesian.py <dataset-dir>...`.
+- `data/dk1_action_normalization_cartesian.json` — single-step cartesian-delta stats (regenerate with
+  `scripts/compute_dk1_cartesian_stats.py`).
+- `requirements.txt` — extra deps beyond cosmos-framework (video-reader-rs, pytorch-kinematics).
 - `scripts/launch_dk1_sft_optb.sh` — launcher for the current recipe. `scripts/launch_dk1_sft.sh` — baseline.
 - `docs/` — lerobot/Cosmos compatibility notes, dry-run checklist.
 - `framework_patches.diff` — **required** patches to a `cosmos-framework` checkout (see Setup).
 
 ## Setup
-1. Clone + install `NVIDIA/cosmos-framework` (cu130 venv); also `pip install video-reader-rs==0.4.3`.
+1. Clone + install `NVIDIA/cosmos-framework` (cu130 venv); then the extras:
+   `uv pip install -r requirements.txt` (video-reader-rs; pytorch-kinematics — only needed to build cartesian FK caches).
 2. Apply the framework patches: `git -C <cosmos-framework> apply framework_patches.diff` — 4 files:
-   - `domain_utils.py` — register the `dk1` embodiment (domain 25, raw action dim 14).
+   - `domain_utils.py` — register the `dk1` (domain 25, dim 14) and `dk1_cartesian` (domain 26, dim 20) embodiments.
    - `configs/base/config.py` — `COSMOS_EXTRA_EXPERIMENTS` hook in `make_config()` to register
      out-of-tree experiments.
    - `model/vfm/omni_mot_model.py` — (a) `add_lora` reads `$LORA_ALSO_TRAIN` to keep the listed non-LoRA
@@ -49,7 +57,23 @@ DK-1 embodiment (14-D bimanual joint-space). See [`PLAN.md`](PLAN.md) for the fu
    - `WANDB_MODE=offline` — dry run, no W&B upload.
    - `VIDEO_FIT_MODE=crop|pad|stretch` — camera→bucket fit (default `crop`); drives training + viz (for ablation).
    - `PER_MODE_LOG_FREQ=<n>` — per-mode loss cadence (default 100). `ACTION_VIZ_EVERY_N=<n>` — viz cadence (default 250).
-   - `DK1_ACTION_STATS=<path>` — action-stats JSON (default the chunk-32 stats).
+   - `DK1_ACTION_STATS=<path>` — action-stats JSON (default depends on `ACTION_SPACE`).
+   - `ACTION_SPACE=joint|cartesian` — action representation (default `joint`; see **Action space**).
+   - `ACTION_LOSS_WEIGHT=<f>` — action-vs-vision loss weight (launcher default 10 joint / 2 cartesian).
+   - `DK1_CARTESIAN_CACHE=<dir>` — FK EE-pose cache dir (default `cache/cartesian`).
+
+## Action space (`ACTION_SPACE`, default `joint`)
+- **`joint`** — 14D, `[left_arm(6), left_gripper, right_arm(6), right_gripper]`, joints chunk-start-relative,
+  grippers absolute. Uses the `dk1` embodiment + `dk1_action_normalization_relchunk32.json`, `action_loss_weight=10`.
+- **`cartesian`** — 20D bimanual EE pose deltas mirroring Cosmos' DROID layout: per arm
+  `[pos_delta(3), rot6d_delta(6), gripper(1)]`, left then right. Deltas are **single-step**
+  (`backward_framewise`) of the realized end-effector trajectory (from the FK cache, via `pose_abs_to_rel`);
+  grippers absolute. Uses the `dk1_cartesian` embodiment + `dk1_action_normalization_cartesian.json`, and the
+  launcher defaults `action_loss_weight=2` (the 10× default starves the video objective). Single-step deltas are
+  stationary and locally video-aligned, and Cosmos was designed for this convention. **Prereq:** build the FK
+  caches first — `python scripts/compute_cartesian.py <dataset-dir>...` (needs `pytorch-kinematics`), then the
+  stats via `scripts/compute_dk1_cartesian_stats.py`. DK-1 data is joints-only, so EE poses come from FK over
+  `urdf/dk1_dual_arm.urdf` (link `tool0`).
 
 ## Data preprocessing (configurable)
 - **Camera fit** (`video_fit_mode`): head cam fills the top `head_height_frac` (⅔) of the 544×736 bucket,
@@ -89,7 +113,7 @@ Logged every `PER_MODE_LOG_FREQ` steps (default 100) as a 100-step windowed mean
 - `train_per_mode/<mode>_<modality>` — `<mode> ∈ {policy, causal_policy, forward_dynamics, inverse_dynamics}`,
   `<modality> ∈ {vision, action}`. Signal-carrying keys: `policy_action`, `causal_policy_action`,
   `inverse_dynamics_action`, `policy_vision`, `forward_dynamics_vision`; the rest sit at ~0 (masked modality).
-  Raw, **unweighted** per-instance losses (the `action_loss_weight=10` applies only to the total).
+  Raw, **unweighted** per-instance losses (`action_loss_weight` applies only to the total: 10 joint / 2 cartesian).
 - `train_per_mode_frac/<mode>` — realized mode share (sanity-checks `mode_probs`).
 
 ## In-training eval (`EveryNActionViz`)
@@ -105,8 +129,10 @@ episodes, so it's a qualitative monitor, not a generalization benchmark.
 
 ## Key choices
 - **chunk_length=32** (divisible by 4 → 33 video frames = 4·8+1 for clean VAE temporal); longer horizon, fewer replans.
-- **Joint-space, relative** action targets (not cartesian) — cartesian/orientation noise causes IK failures
-  on resting arms (real-robot finding); joint-space sidesteps IK entirely.
+- **Action space: joint (default) or cartesian** — joint-space (14D chunk-relative) sidesteps the cartesian/
+  orientation-noise IK failures seen on resting arms *at deployment*. Cartesian (20D single-step EE deltas,
+  `ACTION_SPACE=cartesian`) mirrors Cosmos' DROID design (stationary, video-aligned deltas) and is under
+  evaluation; its IK risk is deployment-only — as a world-model/training input it's unaffected.
 - **Attention full-FT + gen-MLP LoRA + full action I/O** (`action2llm`/`llm2action`/`action_modality_embed`)
   — a fresh embodiment must be learned, not just adapted; the 5.44B MLP stays frozen-but-LoRA-adapted to fit 2×H100.
 - **Multi-mode** training (policy / causal_policy / forward_dynamics / inverse_dynamics) for action policy,
