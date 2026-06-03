@@ -30,7 +30,7 @@ export ACTION_SPACE=${ACTION_SPACE:-joint}
 if [ "$ACTION_SPACE" = "cartesian" ]; then
     export DK1_ACTION_STATS=${DK1_ACTION_STATS:-$DK1/data/dk1_action_normalization_cartesian.json}
     export ACTION_LOSS_WEIGHT=${ACTION_LOSS_WEIGHT:-2}
-    export DK1_CARTESIAN_CACHE=${DK1_CARTESIAN_CACHE:-/workspace/code/fastwam/cache/cartesian}
+    export DK1_CARTESIAN_CACHE=${DK1_CARTESIAN_CACHE:-$DK1/cache/cartesian}
 else
     export DK1_ACTION_STATS=${DK1_ACTION_STATS:-$DK1/data/dk1_action_normalization_relchunk32.json}
 fi

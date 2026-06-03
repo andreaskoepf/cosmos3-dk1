@@ -42,7 +42,7 @@ _VIDEO_FIT_MODE = os.environ.get("VIDEO_FIT_MODE", "crop")
 # FK EE-pose caches under DK1_CARTESIAN_CACHE and uses the dk1_cartesian embodiment.
 _ACTION_SPACE = os.environ.get("ACTION_SPACE", "joint")
 _CARTESIAN = _ACTION_SPACE == "cartesian"
-_CART_CACHE = os.environ.get("DK1_CARTESIAN_CACHE", "/workspace/code/fastwam/cache/cartesian")
+_CART_CACHE = os.environ.get("DK1_CARTESIAN_CACHE", "/workspace/code/cosmos-dk1/cache/cartesian")
 # Cartesian viz panels (2x2): per-arm pos+rot6d, then gripper.
 _CART_PLOT_GROUPS = [
     ("left_pos+rot6d", list(range(0, 9))), ("left_gripper", [9]),

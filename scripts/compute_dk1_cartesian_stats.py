@@ -85,7 +85,7 @@ def deltas_for_dataset(root: str, cache_root: str) -> np.ndarray:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cache-root", default="/workspace/code/fastwam/cache/cartesian")
+    ap.add_argument("--cache-root", default="/workspace/code/cosmos-dk1/cache/cartesian")
     ap.add_argument("--data-root", default="/workspace/data")
     ap.add_argument("--out", default="data/dk1_action_normalization_cartesian.json")
     args = ap.parse_args()

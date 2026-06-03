@@ -4,6 +4,7 @@ checkpoints/
 outputs/
 outputs*/
 hf_staging*/
+cache/            # generated FK EE-pose caches (scripts/compute_cartesian.py) — regenerable
 *.log
 
 # Python

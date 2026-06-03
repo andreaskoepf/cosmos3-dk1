@@ -1,0 +1,9 @@
+# Extra runtime deps beyond a base cosmos-framework (cu130) install.
+# Install into the same venv: `uv pip install -r requirements.txt` (or pip).
+# Transitive deps (e.g. arm-pytorch-utilities, pytorch-seed for pytorch-kinematics)
+# resolve automatically and are intentionally not pinned here.
+
+video-reader-rs==0.4.3      # fast Rust video decode for the training dataloader
+pytorch-kinematics==0.10.0  # forward kinematics for cartesian EE-pose cache generation
+                            # (scripts/compute_cartesian.py; needed only to (re)build
+                            # the FK caches, not for training off existing caches)

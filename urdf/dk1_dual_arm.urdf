@@ -1,0 +1,631 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DK1 Dual-Arm URDF
+  Generated from STEP file analysis of DK1-X-Tabletop assembly (DK1-X Bottom up).
+
+  ── World Coordinate Frame ──────────────────────────────────────────────────
+    Z-up, Y-forward convention (standard ROS/robotics):
+
+      X+  →  RIGHT   (from the operator's perspective facing the robot)
+      Y+  →  FORWARD (away from the mounting frame, into the workspace)
+      Z+  →  UP
+
+    Origin is at the center of the front aluminum crossbar at table height.
+
+  ── Arm Mounting (from STEP CAD data) ───────────────────────────────────────
+    Both follower arms are mounted on the front crossbar, symmetric about X=0:
+
+      Right arm base:  xyz=( 0.290,  0.000,  0.040) m   rpy=(0, 0, π/2)
+      Left  arm base:  xyz=(-0.290,  0.000,  0.040) m   rpy=(0, 0, π/2)
+
+    Arm separation (center-to-center): 580 mm
+    Mount height above crossbar: 40 mm
+    Both arms have identical orientation (not mirrored); they differ only
+    in their lateral (X) position.
+
+  ── Overhead Camera ─────────────────────────────────────────────────────────
+    Mounted on a 30x30mm vertical mast at the front-center of the frame:
+
+      Position:  xyz=(0.000, 0.011, 0.479) m
+      Tilt:      45° downward toward workspace   rpy=(-2.356, 0, 0)
+
+  ── Mesh Paths ──────────────────────────────────────────────────────────────
+    Relative to this URDF file. Both arms share the same mesh files
+    (meshes/) since they are physically identical.
+-->
+<robot name="dk1_dual_arm">
+
+  <!-- ============================================================ -->
+  <!-- World / mounting structure base                               -->
+  <!-- ============================================================ -->
+  <link name="world"/>
+
+  <!-- ============================================================ -->
+  <!-- Front crossbar: HFS8-4080-700, 700mm aluminum extrusion      -->
+  <!-- Runs along X at Y=0, centered at Z=0.020 (half of 40mm)     -->
+  <!-- ============================================================ -->
+  <!-- Front crossbar: HFS8-4080-700 aluminum extrusion
+       700mm long (X), 80mm deep (Y), 40mm tall (Z)
+       Runs along X axis at Y=0 (front of frame), Z=0..40mm
+       Note: simplified as box, real profile has T-slots -->
+  <link name="front_crossbar">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.700 0.080 0.040"/>
+      </geometry>
+      <material name="aluminum"><color rgba="0.80 0.80 0.80 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.700 0.080 0.040"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="front_crossbar_joint" type="fixed">
+    <parent link="world"/>
+    <child link="front_crossbar"/>
+    <!-- Center of crossbar: X=0, Y=-40mm (front face at Y=0), Z=20mm (center of 40mm height) -->
+    <origin xyz="0.0 0.0 0.020" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================ -->
+  <!-- Camera mast: HFS6-3030-400, vertical 30x30mm extrusion       -->
+  <!-- At front-center of frame, rises 400mm in Z                   -->
+  <!-- ============================================================ -->
+  <!-- Camera mast: HFS6-3030-400 aluminum extrusion
+       30x30mm cross-section, 400mm tall
+       Rises from top of front crossbar (Z=40mm) to Z=440mm
+       Note: simplified as box, real profile has T-slots -->
+  <link name="camera_mast">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.030 0.400"/>
+      </geometry>
+      <material name="aluminum"><color rgba="0.80 0.80 0.80 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.030 0.400"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="camera_mast_joint" type="fixed">
+    <parent link="world"/>
+    <child link="camera_mast"/>
+    <!-- Center of mast: sits on top of crossbar (Z=0.040), rises 400mm, center at Z=0.240 -->
+    <origin xyz="0.0 0.011 0.240" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================ -->
+  <!-- Overhead context camera (top of vertical 30x30 mast)         -->
+  <!-- STEP position: (0, 478.81, -10.65) mm                        -->
+  <!-- Camera Z-axis (optical): (0, -0.707, -0.707) in STEP         -->
+  <!-- ============================================================ -->
+  <link name="overhead_camera"/>
+  <joint name="overhead_camera_mount" type="fixed">
+    <parent link="world"/>
+    <child link="overhead_camera"/>
+    <origin xyz="0.0 0.01065 0.47881" rpy="-2.356194490192345 0 0"/>
+  </joint>
+
+  <!-- ============================================================ -->
+  <!-- RIGHT ARM (STEP X = +290mm)                                  -->
+  <!-- ============================================================ -->
+  <link name="right_base_link">
+    <inertial>
+      <origin xyz="0 0 0.027324" rpy="0 0 0"/>
+      <mass value="0.5111"/>
+      <inertia ixx="0.00017" ixy="0" ixz="0" iyy="0.00017" iyz="0" izz="0.00016"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/base_link.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/base_link.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_arm_mount" type="fixed">
+    <parent link="world"/>
+    <child link="right_base_link"/>
+    <origin xyz="0.290 0.0 0.040" rpy="0 0 1.5707963267948966"/>
+  </joint>
+
+  <link name="right_link1-2">
+    <inertial>
+      <origin xyz="0.0054231 0 0.017086" rpy="0 0 0"/>
+      <mass value="0.5965"/>
+      <inertia ixx="0.00008" ixy="0" ixz="0.00001" iyy="0.00003" iyz="0" izz="0.00008"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link1-2.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link1-2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint1" type="revolute">
+    <origin xyz="0 0 0.0615" rpy="0 0 0"/>
+    <parent link="right_base_link"/>
+    <child link="right_link1-2"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.0943951023931953" upper="2.0943951023931953" effort="100" velocity="5.4"/>
+  </joint>
+
+  <link name="right_link2-3">
+    <inertial>
+      <origin xyz="-0.132 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00051" ixy="0.0" ixz="0.0" iyy="0.01599" iyz="0.0" izz="0.01605"/>
+      <mass value="0.9084"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link2-3.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link2-3.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint2" type="revolute">
+    <origin xyz="0.02 0.0 0.0385" rpy="0 0 0"/>
+    <parent link="right_link1-2"/>
+    <child link="right_link2-3"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.01" upper="3.141592653589793" effort="100" velocity="5.4"/>
+  </joint>
+
+  <link name="right_link3-4">
+    <inertial>
+      <origin xyz="0.18531 0.00068376 0.051638" rpy="0 0 0"/>
+      <inertia ixx="0.00036" ixy="-0.00003" ixz="0.00039" iyy="0.00423" iyz="0.00001" izz="0.00420"/>
+      <mass value="0.7089"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link3-4.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link3-4.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint3" type="revolute">
+    <origin xyz="-0.264 0 0" rpy="0 0 0"/>
+    <parent link="right_link2-3"/>
+    <child link="right_link3-4"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.01" upper="4.71238898038469" effort="100" velocity="5.4"/>
+  </joint>
+
+  <link name="right_link4-5">
+    <inertial>
+      <origin xyz="0.040231 0.0044807 0.035335" rpy="0 0 0"/>
+      <inertia ixx="0.00019" ixy="-0.00002" ixz="-0.00009" iyy="0.00023" iyz="0.00002" izz="0.00014"/>
+      <mass value="0.3995"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link4-5.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link4-5.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint4" type="revolute">
+    <origin xyz="0.244004 0 0.059971" rpy="0 0 0"/>
+    <parent link="right_link3-4"/>
+    <child link="right_link4-5"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.95" upper="1.5707963267948966" effort="20" velocity="5.4"/>
+  </joint>
+
+  <link name="right_link5-6">
+    <inertial>
+      <origin xyz="0.003612 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00083" ixy="0" ixz="0.00007" iyy="0.00082" iyz="0" izz="0.00026"/>
+      <mass value="0.4121"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link5-6.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link5-6.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint5" type="revolute">
+    <origin xyz="0.061868 0 0.0425" rpy="0 0 0"/>
+    <parent link="right_link4-5"/>
+    <child link="right_link5-6"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-1.5707963267948966" upper="1.5707963267948966" effort="20" velocity="5.4"/>
+  </joint>
+
+  <link name="right_link6-7">
+    <inertial>
+      <origin xyz="0.041697 2.4368E-05 0.00014464" rpy="0 0 0"/>
+      <inertia ixx="0.00038" ixy="0" ixz="0" iyy="0.00028" iyz="0" izz="0.00050"/>
+      <mass value="0.5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link6-7.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link6-7.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint6" type="revolute">
+    <origin xyz="0.032 0 -0.0425" rpy="0 0 0"/>
+    <parent link="right_link5-6"/>
+    <child link="right_link6-7"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.141592653589793" upper="3.141592653589793" effort="20" velocity="5.4"/>
+  </joint>
+
+  <link name="right_finger_left">
+    <inertial>
+      <origin xyz="0.08 0.04 0" rpy="0 0 0"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00003"/>
+      <mass value="0.05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/finger_left.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/finger_left.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_gripper_left" type="prismatic">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="right_link6-7"/>
+    <child link="right_finger_left"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.045" upper="0.001" effort="20" velocity="0.18"/>
+  </joint>
+
+  <link name="right_finger_right">
+    <inertial>
+      <origin xyz="0.08 -0.04 0" rpy="0 0 0"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00003"/>
+      <mass value="0.05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/finger_right.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/finger_right.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_gripper_right" type="prismatic">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="right_link6-7"/>
+    <child link="right_finger_right"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.045" upper="0.001" effort="20" velocity="0.18"/>
+  </joint>
+
+  <link name="right_tool0"/>
+  <joint name="right_gripper_tool0" type="fixed">
+    <origin xyz="0.158 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+    <parent link="right_link6-7"/>
+    <child link="right_tool0"/>
+  </joint>
+
+  <link name="right_camera"/>
+  <joint name="right_camera_joint" type="fixed">
+    <parent link="right_link6-7"/>
+    <child link="right_camera"/>
+    <origin xyz="0.0471 0 0.063314" rpy="0 0.2618 0"/>
+  </joint>
+
+  <!-- ============================================================ -->
+  <!-- LEFT ARM (STEP X = -290mm)                                   -->
+  <!-- ============================================================ -->
+  <link name="left_base_link">
+    <inertial>
+      <origin xyz="0 0 0.027324" rpy="0 0 0"/>
+      <mass value="0.5111"/>
+      <inertia ixx="0.00017" ixy="0" ixz="0" iyy="0.00017" iyz="0" izz="0.00016"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/base_link.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/base_link.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_arm_mount" type="fixed">
+    <parent link="world"/>
+    <child link="left_base_link"/>
+    <origin xyz="-0.290 0.0 0.040" rpy="0 0 1.5707963267948966"/>
+  </joint>
+
+  <link name="left_link1-2">
+    <inertial>
+      <origin xyz="0.0054231 0 0.017086" rpy="0 0 0"/>
+      <mass value="0.5965"/>
+      <inertia ixx="0.00008" ixy="0" ixz="0.00001" iyy="0.00003" iyz="0" izz="0.00008"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link1-2.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link1-2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint1" type="revolute">
+    <origin xyz="0 0 0.0615" rpy="0 0 0"/>
+    <parent link="left_base_link"/>
+    <child link="left_link1-2"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.0943951023931953" upper="2.0943951023931953" effort="100" velocity="5.4"/>
+  </joint>
+
+  <link name="left_link2-3">
+    <inertial>
+      <origin xyz="-0.132 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00051" ixy="0.0" ixz="0.0" iyy="0.01599" iyz="0.0" izz="0.01605"/>
+      <mass value="0.9084"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link2-3.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link2-3.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint2" type="revolute">
+    <origin xyz="0.02 0.0 0.0385" rpy="0 0 0"/>
+    <parent link="left_link1-2"/>
+    <child link="left_link2-3"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.01" upper="3.141592653589793" effort="100" velocity="5.4"/>
+  </joint>
+
+  <link name="left_link3-4">
+    <inertial>
+      <origin xyz="0.18531 0.00068376 0.051638" rpy="0 0 0"/>
+      <inertia ixx="0.00036" ixy="-0.00003" ixz="0.00039" iyy="0.00423" iyz="0.00001" izz="0.00420"/>
+      <mass value="0.7089"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link3-4.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link3-4.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint3" type="revolute">
+    <origin xyz="-0.264 0 0" rpy="0 0 0"/>
+    <parent link="left_link2-3"/>
+    <child link="left_link3-4"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.01" upper="4.71238898038469" effort="100" velocity="5.4"/>
+  </joint>
+
+  <link name="left_link4-5">
+    <inertial>
+      <origin xyz="0.040231 0.0044807 0.035335" rpy="0 0 0"/>
+      <inertia ixx="0.00019" ixy="-0.00002" ixz="-0.00009" iyy="0.00023" iyz="0.00002" izz="0.00014"/>
+      <mass value="0.3995"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link4-5.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link4-5.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint4" type="revolute">
+    <origin xyz="0.244004 0 0.059971" rpy="0 0 0"/>
+    <parent link="left_link3-4"/>
+    <child link="left_link4-5"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.95" upper="1.5707963267948966" effort="20" velocity="5.4"/>
+  </joint>
+
+  <link name="left_link5-6">
+    <inertial>
+      <origin xyz="0.003612 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.00083" ixy="0" ixz="0.00007" iyy="0.00082" iyz="0" izz="0.00026"/>
+      <mass value="0.4121"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link5-6.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link5-6.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint5" type="revolute">
+    <origin xyz="0.061868 0 0.0425" rpy="0 0 0"/>
+    <parent link="left_link4-5"/>
+    <child link="left_link5-6"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-1.5707963267948966" upper="1.5707963267948966" effort="20" velocity="5.4"/>
+  </joint>
+
+  <link name="left_link6-7">
+    <inertial>
+      <origin xyz="0.041697 2.4368E-05 0.00014464" rpy="0 0 0"/>
+      <inertia ixx="0.00038" ixy="0" ixz="0" iyy="0.00028" iyz="0" izz="0.00050"/>
+      <mass value="0.5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link6-7.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link6-7.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint6" type="revolute">
+    <origin xyz="0.032 0 -0.0425" rpy="0 0 0"/>
+    <parent link="left_link5-6"/>
+    <child link="left_link6-7"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.141592653589793" upper="3.141592653589793" effort="20" velocity="5.4"/>
+  </joint>
+
+  <link name="left_finger_left">
+    <inertial>
+      <origin xyz="0.08 0.04 0" rpy="0 0 0"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00003"/>
+      <mass value="0.05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/finger_left.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/finger_left.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_gripper_left" type="prismatic">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="left_link6-7"/>
+    <child link="left_finger_left"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.045" upper="0.001" effort="20" velocity="0.18"/>
+  </joint>
+
+  <link name="left_finger_right">
+    <inertial>
+      <origin xyz="0.08 -0.04 0" rpy="0 0 0"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00003"/>
+      <mass value="0.05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/finger_right.glb"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/finger_right.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_gripper_right" type="prismatic">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="left_link6-7"/>
+    <child link="left_finger_right"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.045" upper="0.001" effort="20" velocity="0.18"/>
+  </joint>
+
+  <link name="left_tool0"/>
+  <joint name="left_gripper_tool0" type="fixed">
+    <origin xyz="0.158 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+    <parent link="left_link6-7"/>
+    <child link="left_tool0"/>
+  </joint>
+
+  <link name="left_camera"/>
+  <joint name="left_camera_joint" type="fixed">
+    <parent link="left_link6-7"/>
+    <child link="left_camera"/>
+    <origin xyz="0.0471 0 0.063314" rpy="0 0.2618 0"/>
+  </joint>
+
+</robot>
