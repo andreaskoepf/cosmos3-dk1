@@ -16,22 +16,24 @@ index f7fd14e..b6fa0a2 100644
 +        importlib.import_module(_mod)
      return c
 diff --git a/cosmos_framework/data/vfm/action/domain_utils.py b/cosmos_framework/data/vfm/action/domain_utils.py
-index 917fe4c..a615e72 100644
+index 917fe4c..3c71f0f 100644
 --- a/cosmos_framework/data/vfm/action/domain_utils.py
 +++ b/cosmos_framework/data/vfm/action/domain_utils.py
-@@ -18,6 +18,7 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
+@@ -18,6 +18,8 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
      "robomind-ur": 13,
      "agibotworld": 15,
      "fractal": 20,
 +    "dk1": 25,  # DK-1 bimanual, 14D joint-space (added for cosmos-dk1 SFT)
++    "dk1_cartesian": 26,  # DK-1 bimanual, 20D cartesian EE pose deltas (cosmos-dk1 SFT)
  }
  
  
-@@ -33,6 +34,7 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
+@@ -33,6 +35,8 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
      "robomind-ur": 10,
      "agibotworld": 29,
      "fractal": 10,
 +    "dk1": 14,  # left arm(6) + left gripper(1) + right arm(6) + right gripper(1)
++    "dk1_cartesian": 20,  # per arm: pos(3) + rot6d(6) + gripper(1), left then right
  }
  
  

@@ -61,10 +61,19 @@ class EveryNActionViz(EveryN):
         fps: int = 30,
         run_at_start: bool = True,
         step_size: int = 1,
+        # Raw (pre-pad) action width to plot/score: 14 for joint, 20 for cartesian.
+        raw_action_dim: int = 14,
+        # Plot panels [(title, [dim indices])]; ≤4 (2x2 grid). None → joint default.
+        plot_groups: list | None = None,
     ) -> None:
         super().__init__(every_n, step_size, run_at_start=run_at_start)
         self.name = self.__class__.__name__
-        self.eval_roots = list(eval_roots) if isinstance(eval_roots, (list, tuple)) else [eval_roots]
+        # eval_roots may be a plain list OR an OmegaConf ListConfig (NOT a list subclass,
+        # so isinstance(.., list) is False). Treat any non-string iterable as the roots.
+        self.eval_roots = (
+            [str(eval_roots)] if isinstance(eval_roots, (str, bytes))
+            else [str(r) for r in eval_roots]
+        )
         self.dataset_kwargs = dict(dataset_kwargs)
         self.n_samples = int(n_samples)
         self.add_random = bool(add_random)
@@ -76,7 +85,8 @@ class EveryNActionViz(EveryN):
         self._modes = sorted(set(self.action_modes) | set(self.video_modes))
         self._ds_cache: dict[tuple, "DK1LeRobotDataset"] = {}   # (root, mode) -> eval dataset (lazy)
         self._anchors: list[tuple[str, int]] | None = None      # fixed [(root, window_idx)], distinct datasets
-        self._raw_dim = 14
+        self._raw_dim = int(raw_action_dim)
+        self._plot_groups = list(plot_groups) if plot_groups else _PLOT_GROUPS
 
     def _get_ds(self, root: str, mode: str):
         """Mode-pinned eval dataset for a root (lazy, cached). No tokenizer needed — the
@@ -174,7 +184,7 @@ class EveryNActionViz(EveryN):
         T = gt.shape[0]
         t = np.arange(T)
         fig, axes = plt.subplots(2, 2, figsize=(11, 6))
-        for ax, (name, dims) in zip(axes.flat, _PLOT_GROUPS):
+        for ax, (name, dims) in zip(axes.flat, self._plot_groups):
             for d in dims:
                 ax.plot(t, gt[:, d], "-", lw=1.5, alpha=0.7, label=f"d{d} gt" if len(dims) == 1 else None)
                 ax.plot(t, pred[:, d], "--", lw=1.5, label=f"d{d} pred" if len(dims) == 1 else None)

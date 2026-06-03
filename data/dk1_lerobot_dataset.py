@@ -36,10 +36,14 @@ from lerobot.datasets.video_utils import decode_video_frames
 from torch.utils.data import Dataset
 
 from cosmos_framework.data.vfm.action.action_normalization import load_action_stats, normalize_action
-from cosmos_framework.data.vfm.action.action_spec import Gripper, Joint, build_action_spec
+from cosmos_framework.data.vfm.action.action_spec import Gripper, Joint, Pos, Rot, build_action_spec
 from cosmos_framework.data.vfm.action.domain_utils import get_domain_id
 from cosmos_framework.data.vfm.action.json_formatter import ActionPromptJsonFormatter
-from cosmos_framework.data.vfm.action.pose_utils import compute_idle_frames
+from cosmos_framework.data.vfm.action.pose_utils import (
+    build_abs_pose_from_components,
+    compute_idle_frames,
+    pose_abs_to_rel,
+)
 from cosmos_framework.data.vfm.sequence_packing import SequencePlan, add_special_tokens
 from cosmos_framework.model.vfm.vlm.qwen3_vl.utils import tokenize_caption
 from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
@@ -66,6 +70,28 @@ def dk1_action_spec():
         Joint(n=6, label="left_arm"), Gripper(prefix="left"),
         Joint(n=6, label="right_arm"), Gripper(prefix="right"),
     )
+
+
+def dk1_cartesian_action_spec():
+    """20D bimanual cartesian ActionSpec — mirrors Cosmos' DROID 10D layout per arm:
+    [pos_delta(3), rot6d_delta(6), gripper(1)] for left then right."""
+    return build_action_spec(
+        Pos(prefix="left"), Rot("rot6d", "left"), Gripper(prefix="left"),
+        Pos(prefix="right"), Rot("rot6d", "right"), Gripper(prefix="right"),
+    )
+
+
+# Cartesian cache (fastwam scripts/compute_cartesian.py) column layout, [N, 28].
+# pos[3]+quat_wxyz[4] per arm, for STATE then ACTION joints.
+_CART_COLS = [
+    "state_ee_left_pos_xyz", "state_ee_left_quat_wxyz",
+    "state_ee_right_pos_xyz", "state_ee_right_quat_wxyz",
+    "action_ee_left_pos_xyz", "action_ee_left_quat_wxyz",
+    "action_ee_right_pos_xyz", "action_ee_right_quat_wxyz",
+]
+# Slices into the packed [N,28] cart vector: STATE EE pose (pos, quat) per arm.
+_CART_STATE_LEFT = (slice(0, 3), slice(3, 7))
+_CART_STATE_RIGHT = (slice(7, 10), slice(10, 14))
 
 
 class DK1LeRobotDataset(Dataset):
@@ -170,8 +196,24 @@ class DK1LeRobotDataset(Dataset):
         # 5.0) so large/fast movements past q99 aren't flattened. De-normalization
         # (inference/viz) is the same linear map with no clamp, so it stays consistent.
         action_clip: float = 1.5,
+        # Action representation:
+        #   "joint"     → 14D joint-space (relative joints + absolute grippers; see
+        #                 relative_actions). The original recipe.
+        #   "cartesian" → 20D bimanual EE pose deltas, mirroring Cosmos' DROID layout:
+        #                 per arm [pos_delta(3), rot6d_delta(6), gripper(1)], left then
+        #                 right. Pose deltas are SINGLE-STEP (backward_framewise) of the
+        #                 realized STATE end-effector trajectory (FK cache); grippers
+        #                 absolute from the action column. Requires cartesian_cache_root.
+        action_space: str = "joint",
+        # Root of the fastwam compute_cartesian.py cache (…/cache/cartesian). Each
+        # dataset's EE poses are read from <root>/<dataset_name>/cartesian.parquet,
+        # aligned 1:1 with rows. Required when action_space=="cartesian".
+        cartesian_cache_root: str | None = None,
     ) -> None:
         super().__init__()
+        if action_space not in ("joint", "cartesian"):
+            raise ValueError(f"action_space must be 'joint'|'cartesian', got {action_space!r}")
+        self._action_space = str(action_space)
         self._video_hw = (int(video_hw[0]), int(video_hw[1]))
         self._max_action_dim = int(max_action_dim)
         self._video_backend = str(video_backend)
@@ -218,7 +260,9 @@ class DK1LeRobotDataset(Dataset):
             else None
         )
         self._normalization_path = str(normalization_path)
-        self._domain_id = get_domain_id("dk1")
+        # Cartesian uses its own embodiment id (different raw action dim → different
+        # action-mask width); joint keeps the original "dk1" domain.
+        self._domain_id = get_domain_id("dk1_cartesian" if self._action_space == "cartesian" else "dk1")
         self._norm_stats: dict[str, torch.Tensor] | None = None
 
         self._info = json.loads((self._root / "meta" / "info.json").read_text())
@@ -232,14 +276,34 @@ class DK1LeRobotDataset(Dataset):
             {int(r["task_index"]): str(r["task"]) for r in pq.read_table(tasks_path).to_pylist()}
             if tasks_path.exists() else {}
         )
-        self._rows = sorted(
-            (
-                row
-                for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet"))
-                for row in pq.read_table(path).to_pylist()
-            ),
-            key=lambda row: int(row["index"]),
-        )
+        # Cartesian: load the FK EE-pose cache ([N,28], shard-concat order — the SAME
+        # order compute_cartesian.py read the data shards in) and pair each row with
+        # its cart vector BEFORE the index-sort, so alignment holds regardless of
+        # whether the parquet is pre-sorted by "index".
+        cart_arr = None
+        if self._action_space == "cartesian":
+            if not cartesian_cache_root:
+                raise ValueError("action_space='cartesian' requires cartesian_cache_root")
+            cache_path = Path(cartesian_cache_root) / self._root.name / "cartesian.parquet"
+            ctbl = pq.read_table(cache_path, columns=_CART_COLS)
+            cart_arr = np.concatenate(
+                [np.asarray(ctbl.column(c).to_pylist(), dtype=np.float32) for c in _CART_COLS],
+                axis=1,
+            )  # [N, 28]
+        rows = [
+            row
+            for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet"))
+            for row in pq.read_table(path).to_pylist()
+        ]
+        if cart_arr is not None:
+            if len(rows) != cart_arr.shape[0]:
+                raise ValueError(
+                    f"cartesian cache rows {cart_arr.shape[0]} != dataset rows {len(rows)} "
+                    f"for {self._root.name}"
+                )
+            for row, cart in zip(rows, cart_arr):
+                row["_cart"] = cart
+        self._rows = sorted(rows, key=lambda row: int(row["index"]))
         # Valid window starts: deterministic per-dataset last-N-episode split, AND
         # every chunk window stays within a single episode (no cross-episode mixing).
         ep_order = sorted(self._episodes.keys())
@@ -271,12 +335,16 @@ class DK1LeRobotDataset(Dataset):
         return self._domain_id
 
     @property
+    def _spec(self):
+        return dk1_cartesian_action_spec() if self._action_space == "cartesian" else dk1_action_spec()
+
+    @property
     def action_dim(self) -> int:
-        return 14
+        return 20 if self._action_space == "cartesian" else 14
 
     @property
     def action_names(self) -> list[str]:
-        return dk1_action_spec().names
+        return self._spec.names
 
     def _choose_mode(self) -> str:
         if self._mode != "joint":
@@ -400,6 +468,8 @@ class DK1LeRobotDataset(Dataset):
     def _build_raw_action(
         self, observation_rows: list[dict[str, Any]], action_rows: list[dict[str, Any]]
     ) -> torch.Tensor:
+        if self._action_space == "cartesian":
+            return self._build_cartesian_action(observation_rows, action_rows)
         action = np.asarray([row[_ACTION_FEATURE] for row in action_rows], dtype=np.float32)
         action = action[-self._chunk_length :].copy()  # [chunk_length, 14]
         if self._relative_actions:
@@ -407,6 +477,30 @@ class DK1LeRobotDataset(Dataset):
             # of observation.state, same layout as action). Grippers stay absolute.
             obs_ref = np.asarray(observation_rows[0][_STATE_FEATURE], dtype=np.float32)[:14]
             action[:, _JOINT_DIMS] -= obs_ref[_JOINT_DIMS]
+        return torch.from_numpy(action).float()
+
+    def _build_cartesian_action(
+        self, observation_rows: list[dict[str, Any]], action_rows: list[dict[str, Any]]
+    ) -> torch.Tensor:
+        """20D bimanual EE pose-delta action (mirrors Cosmos' DROID build).
+
+        Per arm: single-step (backward_framewise) deltas of the realized STATE
+        end-effector pose → [pos_delta(3), rot6d_delta(6)], plus the absolute
+        gripper from the action column. Pose deltas come from the FK cache
+        (quat_wxyz); grippers from the 14D action column (idx 6 left, 13 right).
+        """
+        cart = np.stack([row["_cart"] for row in observation_rows]).astype(np.float32)  # [T+1, 28]
+        parts = []
+        for pos_sl, quat_sl in (_CART_STATE_LEFT, _CART_STATE_RIGHT):
+            poses_abs = build_abs_pose_from_components(cart[:, pos_sl], cart[:, quat_sl], "quat_wxyz")
+            poses_rel = pose_abs_to_rel(  # [T+1, 9] = pos(3)+rot6d(6); framewise deltas
+                poses_abs, rotation_format="rot6d", pose_convention="backward_framewise"
+            )
+            parts.append(poses_rel[-self._chunk_length :])  # [chunk, 9]
+        # Absolute grippers from the action column (same convention as joint path).
+        act = np.asarray([row[_ACTION_FEATURE] for row in action_rows], dtype=np.float32)[-self._chunk_length :]
+        lg, rg = act[:, 6:7], act[:, 13:14]
+        action = np.concatenate([parts[0], lg, parts[1], rg], axis=-1)  # [chunk, 20]
         return torch.from_numpy(action).float()
 
     def _normalize_action(self, action: torch.Tensor) -> torch.Tensor:
@@ -418,7 +512,7 @@ class DK1LeRobotDataset(Dataset):
         return (2.0 * (action - q01) / denom - 1.0).clamp(-self._action_clip, self._action_clip)
 
     def _build_result(self, *, mode: str, video: torch.Tensor, action: torch.Tensor, ai_caption: str) -> dict[str, Any]:
-        spec = dk1_action_spec()
+        spec = self._spec
         idle_frames = compute_idle_frames(
             action, spec,
             eps_t=5e-3 / self._fps, eps_r=np.deg2rad(1.5) / self._fps,
@@ -497,7 +591,7 @@ class DK1LeRobotDataset(Dataset):
             "conditioning_fps": torch.tensor(self._fps, dtype=torch.long),
             "mode": mode,
             "domain_id": torch.tensor(self._domain_id, dtype=torch.long),
-            "raw_action_dim": torch.tensor(raw_dim, dtype=torch.long),  # 14 — loss masks padding
+            "raw_action_dim": torch.tensor(raw_dim, dtype=torch.long),  # 14 joint / 20 cartesian — loss masks padding
             "viewpoint": "concat_view",
             "idle_frames": torch.tensor(idle_frames, dtype=torch.long),
             "sequence_plan": sequence_plan,

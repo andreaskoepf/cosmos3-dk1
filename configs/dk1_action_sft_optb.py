@@ -37,11 +37,29 @@ _EVAL_LAST_N = 2
 # "pad" (mirror-padded). VIDEO_FIT_MODE env selects it for both training + viz eval.
 _VIDEO_FIT_MODE = os.environ.get("VIDEO_FIT_MODE", "crop")
 
+# Action representation: "joint" (14D joint-space) or "cartesian" (20D bimanual EE
+# pose deltas — single-step rot6d, mirrors Cosmos' DROID layout). Cartesian reads the
+# FK EE-pose caches under DK1_CARTESIAN_CACHE and uses the dk1_cartesian embodiment.
+_ACTION_SPACE = os.environ.get("ACTION_SPACE", "joint")
+_CARTESIAN = _ACTION_SPACE == "cartesian"
+_CART_CACHE = os.environ.get("DK1_CARTESIAN_CACHE", "/workspace/code/fastwam/cache/cartesian")
+# Cartesian viz panels (2x2): per-arm pos+rot6d, then gripper.
+_CART_PLOT_GROUPS = [
+    ("left_pos+rot6d", list(range(0, 9))), ("left_gripper", [9]),
+    ("right_pos+rot6d", list(range(10, 19))), ("right_gripper", [19]),
+]
+
 cs = ConfigStore.instance()
 
 _NANO = copy.deepcopy(NANO_MODEL_CONFIG)
 _NANO["resolution"] = "480"
 _NANO["rectified_flow_training_config"]["shift"] = 5
+# Multi-task loss balance (action vs vision). Cosmos default 10 starves the video
+# objective (per-mode vision loss RISES while action falls — confirmed on run pymn15fx);
+# 2 keeps video prediction learning alongside the action heads. Env knob.
+_NANO["rectified_flow_training_config"]["action_loss_weight"] = float(
+    os.environ.get("ACTION_LOSS_WEIGHT", "10")
+)
 
 # Full 21-source dk1 datamix (weight ∝ frames/1000) — identical to the baseline.
 _DK1_DATAMIX = [
@@ -93,6 +111,8 @@ _DK1_BLEND = L(DK1BlendedDataset)(
     video_hw=(544, 736),
     eval_last_n_episodes=_EVAL_LAST_N,  # split="train" (default) → excludes the held-out episodes
     video_fit_mode=_VIDEO_FIT_MODE,
+    action_space=_ACTION_SPACE,
+    cartesian_cache_root=(_CART_CACHE if _CARTESIAN else None),
 )
 
 # Shared kwargs for the in-training viz eval datasets (built mode-pinned, split="eval").
@@ -102,6 +122,8 @@ _VIZ_DS_KWARGS = dict(
     relative_actions=True, video_hw=(544, 736), caption_metadata=True,
     tokenizer_config="${model.config.vlm_config.tokenizer}",
     eval_last_n_episodes=_EVAL_LAST_N, video_fit_mode=_VIDEO_FIT_MODE,
+    action_space=_ACTION_SPACE,
+    cartesian_cache_root=(_CART_CACHE if _CARTESIAN else None),
 )
 
 dk1_action_sft_optb = LazyDict(
@@ -155,6 +177,8 @@ dk1_action_sft_optb = LazyDict(
                     n_samples=2, add_random=True, guidance=1.5, num_steps=20, fps=30,
                     action_modes=["policy", "causal_policy"],
                     video_modes=["policy", "forward_dynamics"],
+                    raw_action_dim=(20 if _CARTESIAN else 14),
+                    plot_groups=(_CART_PLOT_GROUPS if _CARTESIAN else None),
                 ),
             ),
         ),

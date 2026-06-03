@@ -22,8 +22,18 @@ export LORA_ALSO_TRAIN=action2llm,llm2action,action_modality_embed,q_proj_moe_ge
 
 export BASE_CHECKPOINT_PATH=$DK1/checkpoints/Cosmos3-Nano-dcp
 export DK1_DATA_ROOT=${DK1_DATA_ROOT:-/workspace/data/dk1_black_and_white_swan_2026-05-13}
-export DK1_ACTION_STATS=${DK1_ACTION_STATS:-$DK1/data/dk1_action_normalization_relchunk32.json}
 export WAN_VAE_PATH=${WAN_VAE_PATH:-/workspace/code/fastwam/weights/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}
+
+# Action representation. cartesian → 20D EE pose deltas (dk1_cartesian embodiment),
+# its own stats, FK cache, and the rebalanced action_loss_weight=2 (vs joint's 10).
+export ACTION_SPACE=${ACTION_SPACE:-joint}
+if [ "$ACTION_SPACE" = "cartesian" ]; then
+    export DK1_ACTION_STATS=${DK1_ACTION_STATS:-$DK1/data/dk1_action_normalization_cartesian.json}
+    export ACTION_LOSS_WEIGHT=${ACTION_LOSS_WEIGHT:-2}
+    export DK1_CARTESIAN_CACHE=${DK1_CARTESIAN_CACHE:-/workspace/code/fastwam/cache/cartesian}
+else
+    export DK1_ACTION_STATS=${DK1_ACTION_STATS:-$DK1/data/dk1_action_normalization_relchunk32.json}
+fi
 
 export IMAGINAIRE_OUTPUT_ROOT=${IMAGINAIRE_OUTPUT_ROOT:-$DK1/outputs_optb}
 mkdir -p "$IMAGINAIRE_OUTPUT_ROOT"
@@ -32,9 +42,10 @@ WANDB_MODE=${WANDB_MODE:-online}
 export WANDB_ENTITY=${WANDB_ENTITY:-andreaskoepf}
 
 NPROC=${NPROC:-2}
-echo "Launching dk1_action_sft_optb | GPUs=$NPROC | wandb=$WANDB_MODE | out=$IMAGINAIRE_OUTPUT_ROOT"
+echo "Launching dk1_action_sft_optb | action_space=$ACTION_SPACE | action_loss_weight=${ACTION_LOSS_WEIGHT:-10} | stats=$DK1_ACTION_STATS | GPUs=$NPROC | wandb=$WANDB_MODE | out=$IMAGINAIRE_OUTPUT_ROOT"
 cd "$COSMOS"
 exec "$VENV/bin/torchrun" --nproc_per_node="$NPROC" --master_port="${MASTER_PORT:-12365}" \
     -m cosmos_framework.scripts.train \
     --sft-toml="$DK1/configs/dk1_action_sft_optb.toml" \
+    job.name="dk1_action_sft_optb_${ACTION_SPACE}" \
     job.wandb_mode="$WANDB_MODE"
