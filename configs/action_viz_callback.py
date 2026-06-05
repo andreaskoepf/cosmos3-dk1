@@ -65,6 +65,8 @@ class EveryNActionViz(EveryN):
         raw_action_dim: int = 14,
         # Plot panels [(title, [dim indices])]; ≤4 (2x2 grid). None → joint default.
         plot_groups: list | None = None,
+        # Per-panel y-axis limits: None → autoscale per panel (zoom to data); (lo,hi) → fixed.
+        ylim: tuple | None = None,
     ) -> None:
         super().__init__(every_n, step_size, run_at_start=run_at_start)
         self.name = self.__class__.__name__
@@ -87,6 +89,7 @@ class EveryNActionViz(EveryN):
         self._anchors: list[tuple[str, int]] | None = None      # fixed [(root, window_idx)], distinct datasets
         self._raw_dim = int(raw_action_dim)
         self._plot_groups = list(plot_groups) if plot_groups else _PLOT_GROUPS
+        self._ylim = tuple(ylim) if ylim is not None else None  # None → autoscale per panel
 
     def _get_ds(self, root: str, mode: str):
         """Mode-pinned eval dataset for a root (lazy, cached). No tokenizer needed — the
@@ -181,16 +184,45 @@ class EveryNActionViz(EveryN):
         return a[:, : self._raw_dim].detach().float().cpu().numpy()
 
     def _action_figure(self, mode: str, gt: np.ndarray, pred: np.ndarray) -> "plt.Figure":
+        """Per-dim small multiples. Delta dims (multi-dim groups, e.g. arms): prediction as
+        BARS with the GT overlaid as a crimson horizontal target tick per step — the gap
+        bar-top→tick is the error. Gripper dims (1-dim groups, absolute): a line plot.
+        GT is crimson and pred is blue everywhere. Grid is derived from self._plot_groups."""
         T = gt.shape[0]
         t = np.arange(T)
-        fig, axes = plt.subplots(2, 2, figsize=(11, 6))
-        for ax, (name, dims) in zip(axes.flat, self._plot_groups):
-            for d in dims:
-                ax.plot(t, gt[:, d], "-", lw=1.5, alpha=0.7, label=f"d{d} gt" if len(dims) == 1 else None)
-                ax.plot(t, pred[:, d], "--", lw=1.5, label=f"d{d} pred" if len(dims) == 1 else None)
-            ax.set_title(name); ax.set_xlabel("step"); ax.grid(alpha=0.3)
-            ax.set_ylim(-1.6, 1.6)  # fixed normalized axis → close lines == low MSE (no autoscale)
-        fig.suptitle(f"{mode}: NORMALIZED action chunk (solid=GT, dashed=pred)")
+        # Flatten groups → per-dim cells: (dim, label, kind). 1-dim group → "line" (gripper).
+        cells: list[tuple[int, str, str]] = []
+        for grp in self._plot_groups:
+            name, dims = grp[0], grp[1]
+            labs = grp[2] if len(grp) > 2 else [f"d{d}" for d in dims]
+            nl = name.lower()
+            pre = "L_" if "left" in nl else ("R_" if "right" in nl else "")
+            kind = "line" if len(dims) == 1 else "bar"
+            cells += [(d, pre + lab, kind) for d, lab in zip(dims, labs)]
+        n = len(cells)
+        ncol = 5
+        nrow = int(np.ceil(n / ncol))
+        fig, axes = plt.subplots(nrow, ncol, figsize=(2.6 * ncol, 1.9 * nrow),
+                                 sharex=True, squeeze=False)
+        w = 0.8
+        for k, ax in enumerate(axes.flat):
+            if k >= n:
+                ax.axis("off"); continue
+            d, lab, kind = cells[k]
+            if kind == "line":  # gripper (absolute) → line; GT crimson, pred blue
+                ax.plot(t, gt[:, d], "-", color="crimson", lw=1.4, label="GT")
+                ax.plot(t, pred[:, d], "-", color="C0", lw=1.4, alpha=0.85, label="pred")
+                ax.set_title(lab, fontsize=8, color="C2")
+            else:               # delta dim → pred bars + GT target ticks
+                ax.bar(t, pred[:, d], width=w, color="C0", alpha=0.85, label="pred")
+                ax.hlines(gt[:, d], t - w / 2, t + w / 2, color="crimson", lw=1.4, label="GT")
+                ax.axhline(0, color="k", lw=0.4)
+                ax.set_title(lab, fontsize=8)
+            if self._ylim is not None:
+                ax.set_ylim(*self._ylim)  # else autoscale per cell
+            ax.tick_params(labelsize=6); ax.grid(alpha=0.2, axis="y")
+        axes.flat[0].legend(fontsize=6, loc="upper right")
+        fig.suptitle(f"{mode}: NORMALIZED action chunk — pred=bars(blue), GT=crimson ticks; grippers=lines")
         fig.tight_layout()
         return fig
 

@@ -43,10 +43,12 @@ _VIDEO_FIT_MODE = os.environ.get("VIDEO_FIT_MODE", "crop")
 _ACTION_SPACE = os.environ.get("ACTION_SPACE", "joint")
 _CARTESIAN = _ACTION_SPACE == "cartesian"
 _CART_CACHE = os.environ.get("DK1_CARTESIAN_CACHE", "/workspace/code/cosmos-dk1/cache/cartesian")
-# Cartesian viz panels (2x2): per-arm pos+rot6d, then gripper.
+# Cartesian viz panels (2x2): per-arm pos+rot6d, then gripper. 3rd tuple elem = per-dim
+# legend labels (pos x/y/z, rot6d r0..r5, gripper) — color=dim, solid=GT, dashed=pred.
+_CART_ARM_LABELS = ["px", "py", "pz", "r0", "r1", "r2", "r3", "r4", "r5"]
 _CART_PLOT_GROUPS = [
-    ("left_pos+rot6d", list(range(0, 9))), ("left_gripper", [9]),
-    ("right_pos+rot6d", list(range(10, 19))), ("right_gripper", [19]),
+    ("left_pos+rot6d", list(range(0, 9)), _CART_ARM_LABELS), ("left_gripper", [9], ["grip"]),
+    ("right_pos+rot6d", list(range(10, 19)), _CART_ARM_LABELS), ("right_gripper", [19], ["grip"]),
 ]
 
 cs = ConfigStore.instance()
