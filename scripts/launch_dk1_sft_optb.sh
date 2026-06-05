@@ -41,6 +41,20 @@ mkdir -p "$IMAGINAIRE_OUTPUT_ROOT"
 WANDB_MODE=${WANDB_MODE:-online}
 export WANDB_ENTITY=${WANDB_ENTITY:-andreaskoepf}
 
+# --- Resume W&B hygiene -----------------------------------------------------
+# On resume the framework re-attaches the persisted run id ($job/wandb_id.txt) with
+# resume="allow". If the previous process logged PAST the checkpoint we resume from
+# (e.g. it was hard-killed mid-stretch), W&B then rejects the re-done steps until
+# training passes the old max step, and the run can read "crashed" with no live data.
+# Set WANDB_FRESH=1 to start a NEW W&B run for this (re)launch instead — clean step
+# axis, live immediately. The CHECKPOINT resume (checkpoints/latest_checkpoint.txt) is
+# independent of wandb_id.txt and is NOT affected.
+_JOB_DIR="$IMAGINAIRE_OUTPUT_ROOT/dk1-cosmos-sft/sft/dk1_action_sft_optb_${ACTION_SPACE}"
+if [ "${WANDB_FRESH:-0}" = "1" ] && [ -f "$_JOB_DIR/wandb_id.txt" ]; then
+    mv "$_JOB_DIR/wandb_id.txt" "$_JOB_DIR/wandb_id.prev_$(date +%s).txt"
+    echo "WANDB_FRESH=1 → archived wandb_id.txt; a NEW W&B run will be created (checkpoint resume unaffected)."
+fi
+
 NPROC=${NPROC:-2}
 echo "Launching dk1_action_sft_optb | action_space=$ACTION_SPACE | action_loss_weight=${ACTION_LOSS_WEIGHT:-10} | stats=$DK1_ACTION_STATS | GPUs=$NPROC | wandb=$WANDB_MODE | out=$IMAGINAIRE_OUTPUT_ROOT"
 cd "$COSMOS"

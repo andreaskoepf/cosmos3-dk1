@@ -55,6 +55,9 @@ DK-1 embodiment (14-D bimanual joint-space). See [`PLAN.md`](PLAN.md) for the fu
 3. Download `nvidia/Cosmos3-Nano` and convert to DCP (`convert_model_to_dcp`).
 4. Point env vars in the launcher at your paths, then `bash scripts/launch_dk1_sft_optb.sh`. Env knobs:
    - `WANDB_MODE=offline` — dry run, no W&B upload.
+   - `WANDB_FRESH=1` — on **resume**, start a NEW W&B run instead of re-attaching the persisted id.
+     Use when the prior process was killed *past* its last checkpoint: otherwise W&B rejects the re-done
+     steps (must be monotonically increasing) and the run reads "crashed". Checkpoint resume is unaffected.
    - `VIDEO_FIT_MODE=crop|pad|stretch` — camera→bucket fit (default `crop`); drives training + viz (for ablation).
    - `PER_MODE_LOG_FREQ=<n>` — per-mode loss cadence (default 100). `ACTION_VIZ_EVERY_N=<n>` — viz cadence (default 250).
    - `DK1_ACTION_STATS=<path>` — action-stats JSON (default depends on `ACTION_SPACE`).
